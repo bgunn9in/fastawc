@@ -2,11 +2,11 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <string>
 #include <vector>
 #include <iostream>
+
+#define __AVX2__
 
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -54,43 +54,7 @@ struct Avx2State {
 	uint32_t prevSpaceBit = 1;
 	uint64_t currentLineLen = 0;
 };
-#endif
 
-inline void processScalar(const unsigned char* buf, size_t n, Counts& out, ScalarState& st,
-	bool countLines, bool countWords, bool countBytes,
-	bool countChars, bool countMaxLine)
-{
-	if (countBytes) out.byteCount += n;
-	for (size_t i = 0; i < n; ++i) {
-		unsigned char c = buf[i];
-		if (countLines && c == '\n') out.lineCount++;
-		bool space = isSpaceAscii(c);
-		if (countWords) {
-			if (!space && st.prevSpace) out.wordCount++;
-		}
-		st.prevSpace = space;
-		if (countChars) {
-			if (isUtf8Lead(c)) {
-				out.charCount++;
-				if (countMaxLine) st.currentLineLen++;
-			}
-		}
-		else if (countMaxLine) {
-			st.currentLineLen++;
-		}
-		if (countMaxLine && c == '\n') {
-			if (st.currentLineLen > out.maxLineLength) out.maxLineLength = st.currentLineLen;
-			st.currentLineLen = 0;
-		}
-	}
-}
-
-inline void finalizeScalar(Counts& out, ScalarState& st, bool countMaxLine) {
-	if (countMaxLine && st.currentLineLen > out.maxLineLength)
-		out.maxLineLength = st.currentLineLen;
-}
-
-#ifdef __AVX2__
 inline __m256i vset1(uint8_t c) { return _mm256_set1_epi8((char)c); }
 inline uint32_t maskNewlines32(const __m256i v) {
 	__m256i cmp = _mm256_cmpeq_epi8(v, vset1('\n'));
@@ -156,6 +120,40 @@ inline void processTail(const unsigned char* buf, size_t n, Counts& out, Avx2Sta
 		if (countChars) if (isUtf8Lead(c)) out.charCount++;
 	}
 }
+#else
+inline void processScalar(const unsigned char* buf, size_t n, Counts& out, ScalarState& st,
+	bool countLines, bool countWords, bool countBytes,
+	bool countChars, bool countMaxLine)
+{
+	if (countBytes) out.byteCount += n;
+	for (size_t i = 0; i < n; ++i) {
+		unsigned char c = buf[i];
+		if (countLines && c == '\n') out.lineCount++;
+		bool space = isSpaceAscii(c);
+		if (countWords) {
+			if (!space && st.prevSpace) out.wordCount++;
+		}
+		st.prevSpace = space;
+		if (countChars) {
+			if (isUtf8Lead(c)) {
+				out.charCount++;
+				if (countMaxLine) st.currentLineLen++;
+			}
+		}
+		else if (countMaxLine) {
+			st.currentLineLen++;
+		}
+		if (countMaxLine && c == '\n') {
+			if (st.currentLineLen > out.maxLineLength) out.maxLineLength = st.currentLineLen;
+			st.currentLineLen = 0;
+		}
+	}
+}
+
+inline void finalizeScalar(Counts& out, ScalarState& st, bool countMaxLine) {
+	if (countMaxLine && st.currentLineLen > out.maxLineLength)
+		out.maxLineLength = st.currentLineLen;
+}
 #endif
 
 static void printCounts(const Counts& c, const std::string* label,
@@ -217,7 +215,7 @@ int main(int argc, char** argv) {
 		else {
 			f = fopen(path.c_str(), "rb");
 			if (!f) {
-				std::cerr << "wc_fast: cannot open " << path << "\n";
+				std::cerr << "fastawc: cannot open " << path << "\n";
 				continue;
 			}
 		}
