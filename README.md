@@ -21,10 +21,13 @@ Counting modes:
 
 Optional environment overrides:
 - `FASTAWC_BACKEND=scalar|avx2`
+- `FASTAWC_AUTOTUNE=1`
 - `FASTAWC_THREADS=<n>`
 - `FASTAWC_MIN_PARALLEL_MB=<n>`
 - `FASTAWC_BYTES_PER_WORKER_MB=<n>`
 - `FASTAWC_TARGET_CHUNK_MB=<n>`
+
+`FASTAWC_AUTOTUNE=1` runs a short startup calibration for strict `-m/-L` workloads and picks the faster backend for the current CPU between `scalar` and `avx2`.
 
 ## Notes
 - Target floor for the fast backend is AVX2-class CPUs such as Intel Core i7-6700.
@@ -52,6 +55,11 @@ Lower-noise run with warmup, round-robin backend order and CPU pinning:
 python bench_backends.py --file big.txt --runs 10 --warmup 2 --interleave --affinity 0-7
 ```
 
+Write machine-readable reports:
+```bash
+python bench_backends.py --file big.txt --scenarios strict-full --json-out bench.json --csv-out bench.csv
+```
+
 Split benchmark by workload shape:
 ```bash
 python bench_backends.py --file big.txt --runs 5 --warmup 1 --interleave --affinity 0-7 --scenarios full classic unicode bytes
@@ -71,3 +79,6 @@ Generated test data profiles:
 - `ascii`: ASCII-heavy English text
 - `mixed`: mostly ASCII with periodic UTF-8 lines
 - `utf8`: UTF-8-heavy text
+- `whitespace`: whitespace-pathological input with tabs and Unicode spaces
+- `longlines`: long-line-heavy input for `-L` stress
+- `shortlines`: many short lines for newline-density stress

@@ -144,7 +144,7 @@ const Backend& select_backend() noexcept {
 	return scalar_backend();
 }
 
-RuntimeConfig choose_runtime_config(const Backend& backend, const uint32_t scanMode) noexcept {
+RuntimeConfig choose_runtime_config(const Backend& backend, const ScanModeKind scanKind, const uint32_t scanMode) noexcept {
 	RuntimeConfig config{};
 	if (scanMode == 0) {
 		config.maxWorkers = 1;
@@ -165,10 +165,24 @@ RuntimeConfig choose_runtime_config(const Backend& backend, const uint32_t scanM
 		(scanMode & kScanWords) != 0 ||
 		(scanMode & kScanChars) != 0 ||
 		(scanMode & kScanMaxLine) != 0;
+	const bool strictHeavy = scanKind == ScanModeKind::strict && (scanMode & (kScanChars | kScanMaxLine)) != 0;
+	const bool strictClassic = scanKind == ScanModeKind::strict && !strictHeavy;
 
 	size_t minParallelFileSize = backend.isAvx2 ? (expensive ? (64ull << 20) : (96ull << 20)) : (expensive ? (96ull << 20) : (128ull << 20));
 	size_t minBytesPerWorker = backend.isAvx2 ? (expensive ? (48ull << 20) : (64ull << 20)) : (expensive ? (64ull << 20) : (96ull << 20));
 	size_t targetChunkSize = backend.isAvx2 ? (expensive ? (32ull << 20) : (48ull << 20)) : (expensive ? (48ull << 20) : (64ull << 20));
+
+	if (strictHeavy) {
+		minParallelFileSize = backend.isAvx2 ? (32ull << 20) : (24ull << 20);
+		minBytesPerWorker = backend.isAvx2 ? (24ull << 20) : (16ull << 20);
+		targetChunkSize = backend.isAvx2 ? (24ull << 20) : (16ull << 20);
+		hardwareWorkers = std::min(hardwareWorkers, 6u);
+	}
+	else if (strictClassic) {
+		minParallelFileSize = backend.isAvx2 ? (32ull << 20) : (48ull << 20);
+		minBytesPerWorker = backend.isAvx2 ? (24ull << 20) : (32ull << 20);
+		targetChunkSize = backend.isAvx2 ? (24ull << 20) : (32ull << 20);
+	}
 
 	if (hardwareWorkers <= 2) {
 		minParallelFileSize *= 2;

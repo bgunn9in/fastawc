@@ -25,28 +25,44 @@ unsigned ThreadPool::worker_count() const noexcept {
 	return static_cast<unsigned>(workers_.size()) + 1u;
 }
 
-void ThreadPool::worker_loop() {
+void ThreadPool::run_batch_worker(
+	void* const context,
+	void(*const fn)(void*, unsigned) noexcept,
+	const unsigned taskCount) noexcept
+{
 	for (;;) {
-		Task task{};
+		const unsigned index = nextIndex_.fetch_add(1, std::memory_order_relaxed);
+		if (index >= taskCount) {
+			break;
+		}
+		fn(context, index);
+	}
+
+	if (activeWorkers_.fetch_sub(1, std::memory_order_acq_rel) == 1u) {
+		std::lock_guard lock(mutex_);
+		workFinished_.notify_one();
+	}
+}
+
+void ThreadPool::worker_loop() {
+	unsigned seenGeneration = 0;
+	for (;;) {
+		void(*fn)(void*, unsigned) noexcept = nullptr;
+		void* context = nullptr;
+		unsigned taskCount = 0;
 		{
 			std::unique_lock lock(mutex_);
-			workAvailable_.wait(lock, [this]() noexcept { return stop_ || !tasks_.empty(); });
-			if (stop_ && tasks_.empty()) {
+			workAvailable_.wait(lock, [this, &seenGeneration]() noexcept { return stop_ || generation_ != seenGeneration; });
+			if (stop_) {
 				return;
 			}
-
-			task = tasks_.front();
-			tasks_.pop_front();
+			seenGeneration = generation_;
+			fn = batchFn_;
+			context = batchContext_;
+			taskCount = batchTaskCount_;
 		}
 
-		task.fn(task.context, task.index);
-
-		{
-			std::lock_guard lock(mutex_);
-			if (--pending_ == 0) {
-				workFinished_.notify_one();
-			}
-		}
+		run_batch_worker(context, fn, taskCount);
 	}
 }
 
@@ -67,17 +83,19 @@ void ThreadPool::parallel_for_impl(
 
 	{
 		std::lock_guard lock(mutex_);
-		pending_ = taskCount - 1;
-		for (unsigned index = 1; index < taskCount; ++index) {
-			tasks_.push_back(Task{ fn, context, index });
-		}
+		batchFn_ = fn;
+		batchContext_ = context;
+		batchTaskCount_ = taskCount;
+		nextIndex_.store(0, std::memory_order_relaxed);
+		activeWorkers_.store(static_cast<unsigned>(workers_.size()) + 1u, std::memory_order_release);
+		++generation_;
 	}
 
 	workAvailable_.notify_all();
-	fn(context, 0);
+	run_batch_worker(context, fn, taskCount);
 
 	std::unique_lock lock(mutex_);
-	workFinished_.wait(lock, [this]() noexcept { return pending_ == 0; });
+	workFinished_.wait(lock, [this]() noexcept { return activeWorkers_.load(std::memory_order_acquire) == 0u; });
 }
 
 } // namespace fastawc

@@ -21,7 +21,7 @@ const Backend& avx2_backend() noexcept;
 
 bool cpu_supports_avx2() noexcept;
 const Backend& select_backend() noexcept;
-RuntimeConfig choose_runtime_config(const Backend& backend, uint32_t scanMode) noexcept;
+RuntimeConfig choose_runtime_config(const Backend& backend, ScanModeKind scanKind, uint32_t scanMode) noexcept;
 void finalize_scan_state(ScanModeKind scanKind, uint32_t scanMode, Counts& counts, ScanState& state) noexcept;
 
 } // namespace fastawc

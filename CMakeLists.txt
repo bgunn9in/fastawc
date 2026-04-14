@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(fastawc LANGUAGES CXX)
 
 include(CheckIPOSupported)
+include(CTest)
 
 option(FASTAWC_ENABLE_LTO "Enable interprocedural optimization in release builds" ON)
 option(FASTAWC_ENABLE_AVX2_BACKEND "Build the AVX2 runtime backend when supported by the target architecture" ON)
@@ -64,4 +65,12 @@ endif()
 
 if(UNIX AND NOT APPLE)
 	target_compile_definitions(fastawc PRIVATE _FILE_OFFSET_BITS=64)
+endif()
+
+find_package(Python3 COMPONENTS Interpreter)
+if(BUILD_TESTING AND Python3_Interpreter_FOUND)
+	add_test(
+		NAME fastawc_regression
+		COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.py $<TARGET_FILE:fastawc>
+	)
 endif()

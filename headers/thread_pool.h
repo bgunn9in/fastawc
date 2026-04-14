@@ -1,8 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <mutex>
 #include <thread>
 #include <type_traits>
@@ -36,21 +36,20 @@ public:
 	}
 
 private:
-	struct Task {
-		void(*fn)(void*, unsigned) noexcept = nullptr;
-		void* context = nullptr;
-		unsigned index = 0;
-	};
-
 	void worker_loop();
 	void parallel_for_impl(unsigned taskCount, void* context, void(*fn)(void*, unsigned) noexcept);
+	void run_batch_worker(void* context, void(*fn)(void*, unsigned) noexcept, unsigned taskCount) noexcept;
 
 	std::vector<std::thread> workers_;
-	std::deque<Task> tasks_;
 	std::mutex mutex_;
 	std::condition_variable workAvailable_;
 	std::condition_variable workFinished_;
-	unsigned pending_ = 0;
+	void(*batchFn_)(void*, unsigned) noexcept = nullptr;
+	void* batchContext_ = nullptr;
+	unsigned batchTaskCount_ = 0;
+	unsigned generation_ = 0;
+	std::atomic<unsigned> nextIndex_{ 0 };
+	std::atomic<unsigned> activeWorkers_{ 0 };
 	bool stop_ = false;
 };
 

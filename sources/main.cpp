@@ -3,7 +3,9 @@
 #include "thread_pool.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -43,6 +45,157 @@ FASTAWC_FORCEINLINE bool is_space_ascii(const uint8_t c) noexcept {
 
 FASTAWC_FORCEINLINE bool is_utf8_continuation(const uint8_t c) noexcept {
 	return (c & 0xC0u) == 0x80u;
+}
+
+FASTAWC_FORCEINLINE bool is_unicode_whitespace(const uint32_t codePoint) noexcept {
+	if (codePoint <= 0x7Fu) {
+		return codePoint == ' ' || static_cast<unsigned>(codePoint - '\t') < 5u;
+	}
+
+	switch (codePoint) {
+	case 0x0085u:
+	case 0x00A0u:
+	case 0x1680u:
+	case 0x2028u:
+	case 0x2029u:
+	case 0x202Fu:
+	case 0x205Fu:
+	case 0x2060u:
+	case 0x3000u:
+		return true;
+	default:
+		break;
+	}
+
+	return codePoint >= 0x2000u && codePoint <= 0x200Au;
+}
+
+FASTAWC_FORCEINLINE BoundaryCodePointClass classify_boundary_codepoint(
+	const uint32_t codePoint,
+	const bool valid,
+	const ScanModeKind scanKind) noexcept
+{
+	if (!valid) {
+		return BoundaryCodePointClass::invalid;
+	}
+	if (codePoint <= 0x7Fu) {
+		return is_space_ascii(static_cast<uint8_t>(codePoint))
+			? BoundaryCodePointClass::ascii_space
+			: BoundaryCodePointClass::ascii_nonspace;
+	}
+	if (scanKind == ScanModeKind::strict) {
+		return is_unicode_whitespace(codePoint)
+			? BoundaryCodePointClass::unicode_space
+			: BoundaryCodePointClass::unicode_nonspace;
+	}
+	return BoundaryCodePointClass::unicode_nonspace;
+}
+
+bool decode_utf8_suffix_codepoint(
+	const uint8_t* const data,
+	const size_t begin,
+	const size_t end,
+	uint32_t& codePoint) noexcept
+{
+	if (begin >= end) {
+		return false;
+	}
+
+	const uint8_t lead = data[begin];
+	const size_t length = end - begin;
+	if (lead < 0x80u) {
+		if (length != 1) {
+			return false;
+		}
+		codePoint = lead;
+		return true;
+	}
+
+	uint32_t value = 0;
+	uint32_t minCodePoint = 0;
+	if (lead >= 0xC2u && lead <= 0xDFu) {
+		if (length != 2) {
+			return false;
+		}
+		value = lead & 0x1Fu;
+		minCodePoint = 0x80u;
+	}
+	else if (lead >= 0xE0u && lead <= 0xEFu) {
+		if (length != 3) {
+			return false;
+		}
+		value = lead & 0x0Fu;
+		minCodePoint = 0x800u;
+	}
+	else if (lead >= 0xF0u && lead <= 0xF4u) {
+		if (length != 4) {
+			return false;
+		}
+		value = lead & 0x07u;
+		minCodePoint = 0x10000u;
+	}
+	else {
+		return false;
+	}
+
+	for (size_t i = begin + 1; i < end; ++i) {
+		if (!is_utf8_continuation(data[i])) {
+			return false;
+		}
+		value = (value << 6) | static_cast<uint32_t>(data[i] & 0x3Fu);
+	}
+
+	if (value < minCodePoint || value > 0x10FFFFu || (value >= 0xD800u && value <= 0xDFFFu)) {
+		return false;
+	}
+
+	codePoint = value;
+	return true;
+}
+
+ChunkBoundaryState compute_chunk_boundary_state(
+	const uint8_t* const data,
+	const size_t chunkStart,
+	const ScanModeKind scanKind) noexcept
+{
+	ChunkBoundaryState boundary{};
+	if (chunkStart == 0) {
+		boundary.prevCodePoint = ' ';
+		boundary.prevCodePointClass = BoundaryCodePointClass::ascii_space;
+		boundary.prevCodePointValid = true;
+		return boundary;
+	}
+
+	if (scanKind != ScanModeKind::strict) {
+		const uint32_t codePoint = data[chunkStart - 1];
+		boundary.prevCodePoint = codePoint;
+		boundary.prevCodePointClass = classify_boundary_codepoint(codePoint, true, scanKind);
+		boundary.prevCodePointValid = true;
+		boundary.prevSpaceBit = static_cast<uint32_t>(boundary.prevCodePointClass == BoundaryCodePointClass::ascii_space);
+		return boundary;
+	}
+
+	size_t codePointStart = chunkStart - 1;
+	unsigned backedUp = 0;
+	while (codePointStart > 0 && backedUp < 3 && is_utf8_continuation(data[codePointStart])) {
+		--codePointStart;
+		++backedUp;
+	}
+
+	uint32_t codePoint = 0;
+	if (decode_utf8_suffix_codepoint(data, codePointStart, chunkStart, codePoint)) {
+		boundary.prevCodePoint = codePoint;
+		boundary.prevCodePointClass = classify_boundary_codepoint(codePoint, true, scanKind);
+		boundary.prevCodePointValid = true;
+		boundary.prevSpaceBit =
+			boundary.prevCodePointClass == BoundaryCodePointClass::ascii_space ||
+			boundary.prevCodePointClass == BoundaryCodePointClass::unicode_space;
+		return boundary;
+	}
+
+	boundary.prevCodePointClass = BoundaryCodePointClass::invalid;
+	boundary.prevSpaceBit = 0u;
+	return boundary;
 }
 
 unsigned choose_worker_count(const size_t size, const RuntimeConfig& config, const ThreadPool& pool) noexcept {
@@ -94,7 +247,7 @@ size_t align_chunk_end(
 ChunkResult process_memory_chunk(
 	const uint8_t* const data,
 	const size_t size,
-	const uint32_t initialPrevSpaceBit,
+	const ChunkBoundaryState& initialBoundary,
 	const ScanModeKind scanKind,
 	const uint32_t scanMode,
 	const ScanProcessor processor,
@@ -103,7 +256,7 @@ ChunkResult process_memory_chunk(
 {
 	ChunkResult result{};
 	ScanState state{};
-	state.prevSpaceBit = initialPrevSpaceBit;
+	state.prevSpaceBit = initialBoundary.prevSpaceBit;
 
 	if (countBytes) {
 		result.counts.byteCount = size;
@@ -178,7 +331,7 @@ void process_mapped_data(
 
 	const unsigned workerCount = choose_worker_count(size, config, pool);
 	if (workerCount <= 1) {
-		out = process_memory_chunk(data, size, 1u, scanKind, scanMode, processor, countBytes, countMaxLine).counts;
+		out = process_memory_chunk(data, size, ChunkBoundaryState{}, scanKind, scanMode, processor, countBytes, countMaxLine).counts;
 		return;
 	}
 
@@ -215,13 +368,12 @@ void process_mapped_data(
 	pool.parallel_for(workerCount, [&context, &chunkStarts, &chunkEnds](const unsigned index) noexcept {
 		const size_t chunkStart = chunkStarts[index];
 		const size_t chunkEnd = chunkEnds[index];
-		const uint32_t initialPrevSpaceBit =
-			(chunkStart == 0) ? 1u : static_cast<uint32_t>(is_space_ascii(context.data[chunkStart - 1]));
+		const ChunkBoundaryState initialBoundary = compute_chunk_boundary_state(context.data, chunkStart, context.scanKind);
 
 		(*context.results)[index] = process_memory_chunk(
 			context.data + chunkStart,
 			chunkEnd - chunkStart,
-			initialPrevSpaceBit,
+			initialBoundary,
 			context.scanKind,
 			context.scanMode,
 			context.processor,
@@ -580,12 +732,89 @@ void print_help() {
 	std::puts("      --version          output version information and exit");
 }
 
-const Backend& choose_execution_backend(const Options& options, const uint32_t scanMode) noexcept {
-	const Backend& backend = select_backend();
-	if (options.scanKind == ScanModeKind::strict && (scanMode & (kScanChars | kScanMaxLine)) != 0) {
-		return scalar_backend();
+bool env_flag_enabled(const char* const name) noexcept {
+	const char* const raw = std::getenv(name);
+	if (raw == nullptr || *raw == '\0') {
+		return false;
 	}
-	return backend;
+
+	const std::string_view value{ raw };
+	return value != "0" && value != "false" && value != "FALSE" && value != "False";
+}
+
+std::vector<uint8_t> make_autotune_buffer() {
+	static constexpr std::string_view kPattern =
+		"The Project Gutenberg eBook of War and Peace\r\n"
+		"ASCII text with smart quotes \xE2\x80\x9Cquoted\xE2\x80\x9D words and accents \xC3\xA9.\r\n"
+		"Tabs\tand wide chars \xE8\xA1\xA8 and combining e\xCC\x81.\r\n";
+
+	std::vector<uint8_t> buffer;
+	buffer.reserve(4u << 20);
+	while (buffer.size() < (4u << 20)) {
+		buffer.insert(buffer.end(), kPattern.begin(), kPattern.end());
+	}
+	buffer.resize(4u << 20);
+	return buffer;
+}
+
+uint64_t measure_backend_processor(
+	const Backend& backend,
+	const ScanModeKind scanKind,
+	const uint32_t scanMode,
+	const uint8_t* const data,
+	const size_t size) noexcept
+{
+	const ScanProcessor processor =
+		scanKind == ScanModeKind::strict
+		? backend.selectStrictProcessor(scanMode)
+		: backend.selectFastProcessor(scanMode);
+	if (processor == nullptr) {
+		return UINT64_MAX;
+	}
+
+	uint64_t best = UINT64_MAX;
+	for (unsigned iteration = 0; iteration < 3; ++iteration) {
+		Counts counts{};
+		ScanState state{};
+		const auto started = std::chrono::steady_clock::now();
+		processor(data, size, counts, state);
+		finalize_scan_state(scanKind, scanMode, counts, state);
+		const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+			std::chrono::steady_clock::now() - started).count();
+		best = std::min<uint64_t>(best, static_cast<uint64_t>(elapsed));
+	}
+
+	return best;
+}
+
+const Backend& autotune_backend_for_workload(const ScanModeKind scanKind, const uint32_t scanMode) {
+	static const std::vector<uint8_t> buffer = make_autotune_buffer();
+	const Backend& scalar = scalar_backend();
+#if defined(FASTAWC_HAS_AVX2_BACKEND) && FASTAWC_HAS_AVX2_BACKEND
+	if (!cpu_supports_avx2()) {
+		return scalar;
+	}
+	const Backend& avx2 = avx2_backend();
+	const uint64_t scalarTime = measure_backend_processor(scalar, scanKind, scanMode, buffer.data(), buffer.size());
+	const uint64_t avx2Time = measure_backend_processor(avx2, scanKind, scanMode, buffer.data(), buffer.size());
+	return avx2Time < scalarTime ? avx2 : scalar;
+#else
+	(void)scanKind;
+	(void)scanMode;
+	return scalar;
+#endif
+}
+
+const Backend& choose_execution_backend(const Options& options, const uint32_t scanMode) {
+	if (std::getenv("FASTAWC_BACKEND") != nullptr) {
+		return select_backend();
+	}
+	if (env_flag_enabled("FASTAWC_AUTOTUNE") &&
+		options.scanKind == ScanModeKind::strict &&
+		(scanMode & (kScanChars | kScanMaxLine)) != 0) {
+		return autotune_backend_for_workload(options.scanKind, scanMode);
+	}
+	return select_backend();
 }
 
 } // namespace
@@ -612,7 +841,7 @@ int main(int argc, char** argv) {
 	const Options& options = parsed.options;
 	const uint32_t scanMode = make_scan_mode(options);
 	const Backend& backend = choose_execution_backend(options, scanMode);
-	const RuntimeConfig config = choose_runtime_config(backend, scanMode);
+	const RuntimeConfig config = choose_runtime_config(backend, options.scanKind, scanMode);
 	ThreadPool pool(config.maxWorkers);
 	const ScanProcessor processor =
 		options.scanKind == ScanModeKind::strict

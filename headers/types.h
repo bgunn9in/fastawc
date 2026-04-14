@@ -57,6 +57,23 @@ struct ScanState {
 	bool sawNewline = false;
 };
 
+enum class BoundaryCodePointClass : uint8_t {
+	unknown = 0,
+	ascii_space,
+	ascii_nonspace,
+	unicode_space,
+	unicode_nonspace,
+	invalid
+};
+
+struct ChunkBoundaryState {
+	uint32_t prevSpaceBit = 1;
+	uint32_t prevCodePoint = 0;
+	BoundaryCodePointClass prevCodePointClass = BoundaryCodePointClass::ascii_space;
+	bool prevCodePointValid = false;
+	bool utf8SequenceOpen = false;
+};
+
 struct RuntimeConfig {
 	unsigned maxWorkers = 1;
 	size_t minParallelFileSize = std::numeric_limits<size_t>::max();

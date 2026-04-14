@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import csv
+import json
 import os
 import statistics
 import subprocess
@@ -16,6 +18,9 @@ DEFAULT_ARGS = ("-l", "-w", "-c", "-m", "-L")
 DEFAULT_GENERATED_SIZE_MB = 256
 DEFAULT_TEXT_LINE = "The quick brown fox jumps over the lazy dog 1234567890\n"
 DEFAULT_UTF8_LINE = "Привет мир 12345\n"
+DEFAULT_WHITESPACE_LINE = "word\t \u00a0\u3000word  \t\u200dword\n"
+DEFAULT_SHORT_LINE = "x\n"
+DEFAULT_LONG_LINE = ("The quick brown fox jumps over the lazy dog 1234567890 " * 256) + "\n"
 SCENARIOS: dict[str, tuple[str, ...]] = {
     "full": DEFAULT_ARGS,
     "classic": ("-l", "-w", "-c"),
@@ -75,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--generate-profile",
-        choices=("ascii", "mixed", "utf8"),
+        choices=("ascii", "mixed", "utf8", "whitespace", "longlines", "shortlines"),
         default="ascii",
         help="Content profile for generated test data. Default: %(default)s",
     )
@@ -118,6 +123,8 @@ def parse_args() -> argparse.Namespace:
         default=list(DEFAULT_ARGS),
         help="Arguments passed to fastawc before the input file. Default: -l -w -c -m -L",
     )
+    parser.add_argument("--json-out", help="Write benchmark results as JSON.")
+    parser.add_argument("--csv-out", help="Write benchmark results as CSV.")
     return parser.parse_args()
 
 
@@ -245,6 +252,59 @@ def print_results(results: dict[str, list[float]]) -> None:
         )
 
 
+def make_summary(results: dict[str, list[float]]) -> dict[str, dict[str, float | int]]:
+    return {
+        backend: {
+            "runs": len(timings),
+            "min_ms": min(timings),
+            "avg_ms": statistics.fmean(timings),
+            "max_ms": max(timings),
+        }
+        for backend, timings in results.items()
+    }
+
+
+def write_json_report(
+    output_path: Path,
+    *,
+    binary: Path,
+    input_file: Path,
+    runs: int,
+    warmup: int,
+    interleave: bool,
+    affinity: list[int] | None,
+    scenarios: list[dict[str, object]],
+) -> None:
+    payload = {
+        "binary": str(binary),
+        "file": str(input_file),
+        "runs": runs,
+        "warmup": warmup,
+        "order": "interleaved" if interleave else "grouped",
+        "affinity": affinity,
+        "scenarios": scenarios,
+    }
+    output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def write_csv_report(output_path: Path, scenarios: list[dict[str, object]]) -> None:
+    with output_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["scenario", "backend", "runs", "min_ms", "avg_ms", "max_ms"])
+        for scenario in scenarios:
+            scenario_name = scenario["name"]
+            summary = scenario["summary"]
+            for backend, metrics in summary.items():
+                writer.writerow([
+                    scenario_name,
+                    backend,
+                    metrics["runs"],
+                    f"{metrics['min_ms']:.2f}",
+                    f"{metrics['avg_ms']:.2f}",
+                    f"{metrics['max_ms']:.2f}",
+                ])
+
+
 def resolve_scenarios(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
     if args.scenarios:
         return [(name, list(SCENARIOS[name])) for name in args.scenarios]
@@ -258,6 +318,12 @@ def build_profile_chunk(profile: str) -> bytes:
         return DEFAULT_UTF8_LINE.encode("utf-8") * 4096
     if profile == "mixed":
         return (DEFAULT_TEXT_LINE * 3 + DEFAULT_UTF8_LINE).encode("utf-8") * 2048
+    if profile == "whitespace":
+        return (DEFAULT_WHITESPACE_LINE * 4096).encode("utf-8")
+    if profile == "longlines":
+        return (DEFAULT_LONG_LINE * 128).encode("utf-8")
+    if profile == "shortlines":
+        return (DEFAULT_SHORT_LINE * (1 << 16)).encode("utf-8")
     raise ValueError(f"unknown generate profile: {profile}")
 
 
@@ -314,6 +380,7 @@ def main() -> int:
         print(f"affinity: {','.join(str(cpu) for cpu in affinity)}")
     print()
 
+    scenario_reports: list[dict[str, object]] = []
     for index, (scenario_name, scenario_args) in enumerate(scenarios):
         if index != 0:
             print()
@@ -331,6 +398,25 @@ def main() -> int:
             affinity=affinity,
         )
         print_results(results)
+        scenario_reports.append({
+            "name": scenario_name,
+            "args": scenario_args,
+            "summary": make_summary(results),
+        })
+
+    if args.json_out:
+        write_json_report(
+            Path(args.json_out).expanduser(),
+            binary=binary,
+            input_file=input_file.resolve(),
+            runs=args.runs,
+            warmup=args.warmup,
+            interleave=args.interleave,
+            affinity=affinity,
+            scenarios=scenario_reports,
+        )
+    if args.csv_out:
+        write_csv_report(Path(args.csv_out).expanduser(), scenario_reports)
     return 0
 
 
