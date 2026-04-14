@@ -1,0 +1,14 @@
+[
+  {
+    "label": "cmake_debug_macos",
+    "program": "$ZED_WORKTREE_ROOT/build/debug/projects/Application/Application",
+    "request": "launch",
+    "adapter": "CodeLLDB",
+  },
+  {
+    "label": "cmake_debug_windows",
+    "program": "$ZED_WORKTREE_ROOT/build/x64-Debug/projects/Application/Application.exe",
+    "request": "launch",
+    "adapter": "CodeLLDB",
+  },
+]

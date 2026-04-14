@@ -1,2 +1,8 @@
-.vs
-x64
+.vs/
+x64/
+build/
+out/
+cmake-build-*/
+fastawc/.vs/
+fastawc/x64/
+fastawc/fastawc/

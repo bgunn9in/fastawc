@@ -1,0 +1,99 @@
+[
+  {
+    "label": "configure_debug_macos",
+    "command": "$ZED_WORKTREE_ROOT/.zed/cmake_config.sh",
+    "args": [
+      "-S",
+      ".",
+      "-B",
+      "build/debug",
+      "-G",
+      "Ninja",
+      "-DCMAKE_BUILD_TYPE=Debug",
+    ],
+  },
+  {
+    "label": "configure_debug_windows",
+    "command": "$ZED_WORKTREE_ROOT/.zed/cmake_config.cmd",
+    "args": [
+      "-S",
+      ".",
+      "-B",
+      "build/x64-Debug",
+      "-G",
+      "Ninja",
+      "-DCMAKE_BUILD_TYPE=Debug",
+    ],
+  },
+  {
+    "label": "build_debug_macos",
+    "command": "cmake",
+    "args": ["--build", "build/debug", "-j8"],
+  },
+  {
+    "label": "build_debug_windows",
+    "command": "$ZED_WORKTREE_ROOT/.zed/cmake_build.cmd",
+    "args": ["build/x64-Debug", "--parallel", "8"],
+  },
+  {
+    "label": "configure_release_macos",
+    "command": "$ZED_WORKTREE_ROOT/.zed/cmake_config.sh",
+    "args": [
+      "-S",
+      ".",
+      "-B",
+      "build/release",
+      "-G",
+      "Ninja",
+      "-DCMAKE_BUILD_TYPE=Release",
+    ],
+  },
+  {
+    "label": "configure_release_windows",
+    "command": "$ZED_WORKTREE_ROOT/.zed/cmake_config.cmd",
+    "args": [
+      "-S",
+      ".",
+      "-B",
+      "build/x64-Release",
+      "-G",
+      "Ninja",
+      "-DCMAKE_BUILD_TYPE=Release",
+    ],
+  },
+  {
+    "label": "build_release_macos",
+    "command": "cmake",
+    "args": ["--build", "build/release", "-j8"],
+  },
+  {
+    "label": "build_release_windows",
+    "command": "$ZED_WORKTREE_ROOT/.zed/cmake_build.cmd",
+    "args": ["build/x64-Release", "--parallel", "8"],
+  },
+  {
+    "label": "cpack_release_macos",
+    "command": "cpack",
+    "args": ["-C", "Release", "--config", "build/release/CPackConfig.cmake"],
+  },
+  {
+    "label": "cpack_release_windows",
+    "command": "cpack",
+    "args": [
+      "-C",
+      "Release",
+      "--config",
+      "build/x64-Release/CPackConfig.cmake",
+    ],
+  },
+  {
+    "label": "cpack_debug_macos",
+    "command": "cpack",
+    "args": ["-C", "Debug", "--config", "build/debug/CPackConfig.cmake"],
+  },
+  {
+    "label": "cpack_debug_windows",
+    "command": "cpack",
+    "args": ["-C", "Debug", "--config", "build/x64-Debug/CPackConfig.cmake"],
+  },
+]

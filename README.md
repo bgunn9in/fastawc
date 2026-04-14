@@ -1,8 +1,73 @@
 # fastawc
-Fast C++ wc realization.
+High-throughput `wc`-like utility focused on modern desktop x86-64 CPUs.
 
-Scalar and AVX2 implementation. For build with avx2 use -D__AVX2__
+## Build
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
 
-big.7z - test data.
+The build produces a single `fastawc` binary with:
+- scalar backend for generic x86-64
+- AVX2 backend built as a separate object target and selected at runtime when the CPU/OS support it
+- Windows and POSIX file I/O paths with memory mapping for regular files and streaming fallback for stdin/pipes
 
-bench.ps1 - benchmark script for PowerShell
+## Runtime Tuning
+Automatic backend and parallelism selection is enabled by default.
+
+Counting modes:
+- `fast` is the default and prioritizes throughput
+- `strict` is slower and aims to be closer to `wc` semantics for `-w`, `-m`, and `-L`
+
+Optional environment overrides:
+- `FASTAWC_BACKEND=scalar|avx2`
+- `FASTAWC_THREADS=<n>`
+- `FASTAWC_MIN_PARALLEL_MB=<n>`
+- `FASTAWC_BYTES_PER_WORKER_MB=<n>`
+- `FASTAWC_TARGET_CHUNK_MB=<n>`
+
+## Notes
+- Target floor for the fast backend is AVX2-class CPUs such as Intel Core i7-6700.
+- `big.7z` is sample benchmark data.
+- `bench_backends.py` benchmarks `auto`, `scalar` and `avx2` backends on Windows and POSIX systems.
+
+## Benchmarking
+Basic run:
+```bash
+python bench_backends.py --file big.txt
+```
+
+Strict compatibility run:
+```bash
+build/Release/fastawc --strict -l -w -c -m -L big.txt
+```
+
+Generate a benchmark file automatically:
+```bash
+python bench_backends.py --generate-test-file --generate-size-mb 256 --generate-profile ascii
+```
+
+Lower-noise run with warmup, round-robin backend order and CPU pinning:
+```bash
+python bench_backends.py --file big.txt --runs 10 --warmup 2 --interleave --affinity 0-7
+```
+
+Split benchmark by workload shape:
+```bash
+python bench_backends.py --file big.txt --runs 5 --warmup 1 --interleave --affinity 0-7 --scenarios full classic unicode bytes
+```
+
+Predefined scenarios:
+- `full`: `-l -w -c -m -L`
+- `classic`: `-l -w -c`
+- `unicode`: `-m -L`
+- `bytes`: `-c`
+- `fast-full`: `-l -w -c -m -L`
+- `fast-classic`: `-l -w -c`
+- `strict-full`: `--strict -l -w -c -m -L`
+- `strict-classic`: `--strict -l -w -c`
+
+Generated test data profiles:
+- `ascii`: ASCII-heavy English text
+- `mixed`: mostly ASCII with periodic UTF-8 lines
+- `utf8`: UTF-8-heavy text
