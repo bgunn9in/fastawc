@@ -23,6 +23,8 @@
 - Replaced the manual `0x0..0xF` scan-mode switches with constexpr dispatch tables for both fast and strict processor families.
 - Replaced the chunk-start `prevSpaceBit` bootstrap with an explicit `ChunkBoundaryState` that carries the previous decoded code point and its class, preparing the strict parallel path for richer cross-chunk state.
 - Added a guarded strict AVX2 fast path for mixed blocks that contain only ASCII plus valid 2/3-byte UTF-8 sequences, so common BMP-heavy workloads can bypass the generic UTF-8 state machine without regressing inputs dominated by 4-byte sequences.
+- Fixed Release IPO/LTO wiring so the option is applied to the concrete scalar, AVX2, and executable targets instead of the interface options target.
+- Added Windows strict display-width fast paths for common fixed-width Unicode ranges, with regression coverage for a Cyrillic combining mark to preserve zero-width handling.
 
 ## P0 Correctness And Semantics
 - [x] Fix strict-mode chunk boundary state for parallel mapped scans.

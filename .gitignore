@@ -3,6 +3,7 @@ x64/
 build/
 out/
 cmake-build-*/
+big.txt
 fastawc/.vs/
 fastawc/x64/
 fastawc/fastawc/

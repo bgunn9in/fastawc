@@ -249,6 +249,17 @@ FASTAWC_FORCEINLINE uint64_t unicode_display_width(const uint32_t codePoint) noe
 	}
 
 #ifdef _WIN32
+	if (codePoint < 0x0300u) {
+		return 1;
+	}
+	if ((codePoint >= 0x0400u && codePoint <= 0x0482u) ||
+		(codePoint >= 0x048Au && codePoint <= 0x052Fu)) {
+		return 1;
+	}
+	if ((codePoint >= 0x4E00u && codePoint <= 0x9FFFu) ||
+		(codePoint >= 0xAC00u && codePoint <= 0xD7A3u)) {
+		return 2;
+	}
 	if (is_zero_width_codepoint(codePoint)) {
 		return 0;
 	}

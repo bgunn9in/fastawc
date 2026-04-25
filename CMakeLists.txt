@@ -25,15 +25,20 @@ else()
 	endif()
 endif()
 
+set(FASTAWC_IPO_SUPPORTED FALSE)
 if(FASTAWC_ENABLE_LTO)
 	check_ipo_supported(RESULT FASTAWC_IPO_SUPPORTED)
-	if(FASTAWC_IPO_SUPPORTED)
-		set_property(TARGET fastawc_options PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
-	endif()
 endif()
+
+function(fastawc_enable_ipo target_name)
+	if(FASTAWC_ENABLE_LTO AND FASTAWC_IPO_SUPPORTED)
+		set_property(TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+	endif()
+endfunction()
 
 add_library(fastawc_scalar OBJECT sources/engine_scalar.cpp)
 target_link_libraries(fastawc_scalar PRIVATE fastawc_options)
+fastawc_enable_ipo(fastawc_scalar)
 
 set(FASTAWC_AVX2_AVAILABLE FALSE)
 if(FASTAWC_ENABLE_AVX2_BACKEND AND (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i[3-6]86)$" OR CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "x64|X86"))
@@ -44,6 +49,7 @@ if(FASTAWC_ENABLE_AVX2_BACKEND AND (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD
 	else()
 		target_compile_options(fastawc_avx2 PRIVATE -mavx2)
 	endif()
+	fastawc_enable_ipo(fastawc_avx2)
 	set(FASTAWC_AVX2_AVAILABLE TRUE)
 endif()
 
@@ -55,6 +61,7 @@ add_executable(fastawc
 	$<TARGET_OBJECTS:fastawc_scalar>
 )
 target_link_libraries(fastawc PRIVATE fastawc_options)
+fastawc_enable_ipo(fastawc)
 
 if(FASTAWC_AVX2_AVAILABLE)
 	target_sources(fastawc PRIVATE $<TARGET_OBJECTS:fastawc_avx2>)

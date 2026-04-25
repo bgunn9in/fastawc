@@ -143,6 +143,10 @@ def main() -> int:
         mahjong.write_text("\U0001F004\n", encoding="utf-8", newline="")
         expect_success(run(exe, ["--strict", "-m", "-L", str(mahjong)]), f"2 2 {mahjong}")
 
+        cyrillic_combining = temp_dir / "cyrillic_combining.txt"
+        cyrillic_combining.write_text("a\u0483b\n", encoding="utf-8", newline="")
+        expect_success(run(exe, ["--strict", "-L", str(cyrillic_combining)]), f"2 {cyrillic_combining}")
+
         maybe_compare_with_wc(exe, temp_dir)
 
     print("fastawc regression tests passed")
