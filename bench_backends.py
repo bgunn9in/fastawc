@@ -4,8 +4,10 @@ from __future__ import annotations
 import argparse
 import ctypes
 import csv
+import dataclasses
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -28,6 +30,7 @@ DEFAULT_TABS_LINE = "col1\tcol2\tcol3\tcol4\tcol5\n"
 DEFAULT_CONTROLS_LINE = "alpha\x01beta\x02gamma\x7fdelta\n"
 DEFAULT_NOSPACES_LINE = ("abcdefghijklmnopqrstuvwxyz0123456789" * 32) + "\n"
 DEFAULT_DENSE_NEWLINES_LINE = "a\nb\nc\nd\ne\nf\ng\nh\n"
+SPEED_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s+MiB/s")
 SCENARIOS: dict[str, tuple[str, ...]] = {
 	"full": DEFAULT_ARGS,
 	"classic": ("-l", "-w", "-c"),
@@ -41,6 +44,12 @@ SCENARIOS: dict[str, tuple[str, ...]] = {
 	"strict-classic": ("--strict", "-l", "-w", "-c"),
 	"strict-lines": ("--strict", "-l"),
 }
+
+
+@dataclasses.dataclass(frozen=True)
+class RunSample:
+    elapsed_ms: float
+    speed_mib_s: float | None
 
 
 def resolve_binary(explicit: str | None) -> Path:
@@ -218,7 +227,14 @@ def set_process_affinity(pid: int, cpus: list[int]) -> None:
     raise NotImplementedError("CPU affinity is not supported on this platform")
 
 
-def run_once(binary: Path, input_file: Path, backend: str, extra_args: list[str], affinity: list[int] | None) -> float:
+def parse_speed(stdout: str) -> float | None:
+    matches = SPEED_RE.findall(stdout)
+    if not matches:
+        return None
+    return float(matches[-1])
+
+
+def run_once(binary: Path, input_file: Path, backend: str, extra_args: list[str], affinity: list[int] | None) -> RunSample:
     command = [str(binary), *extra_args, str(input_file)]
     env = os.environ.copy()
     if backend == "auto":
@@ -229,7 +245,7 @@ def run_once(binary: Path, input_file: Path, backend: str, extra_args: list[str]
     started = time.perf_counter()
     proc = subprocess.Popen(
         command,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
         text=True,
@@ -237,7 +253,7 @@ def run_once(binary: Path, input_file: Path, backend: str, extra_args: list[str]
     try:
         if affinity is not None:
             set_process_affinity(proc.pid, affinity)
-        _, stderr = proc.communicate()
+        stdout, stderr = proc.communicate()
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -247,7 +263,7 @@ def run_once(binary: Path, input_file: Path, backend: str, extra_args: list[str]
     if proc.returncode != 0:
         message = (stderr or "").strip() or f"exit code {proc.returncode}"
         raise RuntimeError(f"{backend}: {message}")
-    return elapsed_ms
+    return RunSample(elapsed_ms=elapsed_ms, speed_mib_s=parse_speed(stdout or ""))
 
 
 def benchmark_backends(
@@ -259,8 +275,8 @@ def benchmark_backends(
     extra_args: list[str],
     interleave: bool,
     affinity: list[int] | None,
-) -> dict[str, list[float]]:
-    results: dict[str, list[float]] = {backend: [] for backend in backends}
+) -> dict[str, list[RunSample]]:
+    results: dict[str, list[RunSample]] = {backend: [] for backend in backends}
 
     if interleave:
         for round_index in range(warmup + runs):
@@ -278,42 +294,63 @@ def benchmark_backends(
     return results
 
 
-def print_results(results: dict[str, list[float]]) -> None:
+def sample_timings(samples: list[RunSample]) -> list[float]:
+    return [sample.elapsed_ms for sample in samples]
+
+
+def sample_speeds(samples: list[RunSample]) -> list[float]:
+    return [sample.speed_mib_s for sample in samples if sample.speed_mib_s is not None]
+
+
+def print_results(results: dict[str, list[RunSample]]) -> None:
+    has_speed = any(sample.speed_mib_s is not None for timings in results.values() for sample in timings)
     header = f"{'backend':<10} {'runs':>4} {'min ms':>12} {'avg ms':>12} {'max ms':>12}"
+    if has_speed:
+        header += f" {'avg MiB/s':>12}"
     print(header)
     print("-" * len(header))
     for backend, timings in results.items():
-        print(
+        elapsed = sample_timings(timings)
+        speeds = sample_speeds(timings)
+        row = (
             f"{backend:<10} "
             f"{len(timings):>4} "
-            f"{min(timings):>12.2f} "
-            f"{statistics.fmean(timings):>12.2f} "
-            f"{max(timings):>12.2f}"
+            f"{min(elapsed):>12.2f} "
+            f"{statistics.fmean(elapsed):>12.2f} "
+            f"{max(elapsed):>12.2f}"
         )
+        if has_speed:
+            row += f" {statistics.fmean(speeds):>12.2f}" if speeds else f" {'':>12}"
+        print(row)
 
 
-def make_summary(results: dict[str, list[float]]) -> dict[str, dict[str, float | int]]:
-    return {
-        backend: {
-            "runs": len(timings),
-            "min_ms": min(timings),
-            "avg_ms": statistics.fmean(timings),
-            "max_ms": max(timings),
+def make_summary(results: dict[str, list[RunSample]]) -> dict[str, dict[str, float | int | None]]:
+    summary: dict[str, dict[str, float | int | None]] = {}
+    for backend, samples in results.items():
+        elapsed = sample_timings(samples)
+        speeds = sample_speeds(samples)
+        summary[backend] = {
+            "runs": len(samples),
+            "min_ms": min(elapsed),
+            "avg_ms": statistics.fmean(elapsed),
+            "max_ms": max(elapsed),
+            "avg_mib_s": statistics.fmean(speeds) if speeds else None,
         }
-        for backend, timings in results.items()
-    }
+    return summary
 
 
 def make_comparison_summary(
-    baseline: dict[str, dict[str, float | int]],
-    candidate: dict[str, dict[str, float | int]],
+    baseline: dict[str, dict[str, float | int | None]],
+    candidate: dict[str, dict[str, float | int | None]],
     noise_pct: float,
-) -> dict[str, dict[str, float | str]]:
-    comparison: dict[str, dict[str, float | str]] = {}
+) -> dict[str, dict[str, float | str | None]]:
+    comparison: dict[str, dict[str, float | str | None]] = {}
     for backend, baseline_metrics in baseline.items():
         candidate_metrics = candidate[backend]
         baseline_avg = float(baseline_metrics["avg_ms"])
         candidate_avg = float(candidate_metrics["avg_ms"])
+        baseline_speed = baseline_metrics.get("avg_mib_s")
+        candidate_speed = candidate_metrics.get("avg_mib_s")
         delta_ms = candidate_avg - baseline_avg
         delta_pct = (delta_ms / baseline_avg * 100.0) if baseline_avg != 0.0 else 0.0
         if abs(delta_pct) <= noise_pct:
@@ -326,16 +363,21 @@ def make_comparison_summary(
             "delta_ms": delta_ms,
             "delta_pct": delta_pct,
             "status": status,
+            "baseline_avg_mib_s": float(baseline_speed) if baseline_speed is not None else None,
+            "candidate_avg_mib_s": float(candidate_speed) if candidate_speed is not None else None,
         }
     return comparison
 
 
-def print_comparison(comparison: dict[str, dict[str, float | str]]) -> None:
+def print_comparison(comparison: dict[str, dict[str, float | str | None]]) -> None:
     header = f"{'backend':<10} {'base avg':>12} {'cand avg':>12} {'delta ms':>12} {'delta %':>10} {'status':>8}"
+    has_speed = any(metrics.get("baseline_avg_mib_s") is not None or metrics.get("candidate_avg_mib_s") is not None for metrics in comparison.values())
+    if has_speed:
+        header += f" {'base MiB/s':>12} {'cand MiB/s':>12}"
     print(header)
     print("-" * len(header))
     for backend, metrics in comparison.items():
-        print(
+        row = (
             f"{backend:<10} "
             f"{float(metrics['baseline_avg_ms']):>12.2f} "
             f"{float(metrics['candidate_avg_ms']):>12.2f} "
@@ -343,6 +385,16 @@ def print_comparison(comparison: dict[str, dict[str, float | str]]) -> None:
             f"{float(metrics['delta_pct']):>9.2f}% "
             f"{str(metrics['status']):>8}"
         )
+        if has_speed:
+            base_speed = metrics.get("baseline_avg_mib_s")
+            candidate_speed = metrics.get("candidate_avg_mib_s")
+            row += (
+                f" {float(base_speed):>12.2f}" if base_speed is not None else f" {'':>12}"
+            )
+            row += (
+                f" {float(candidate_speed):>12.2f}" if candidate_speed is not None else f" {'':>12}"
+            )
+        print(row)
 
 
 def write_json_report(
@@ -379,6 +431,7 @@ def write_csv_report(output_path: Path, scenarios: list[dict[str, object]]) -> N
             "min_ms",
             "avg_ms",
             "max_ms",
+            "avg_mib_s",
             "delta_ms",
             "delta_pct",
             "status",
@@ -396,6 +449,7 @@ def write_csv_report(output_path: Path, scenarios: list[dict[str, object]]) -> N
                         f"{metrics['min_ms']:.2f}",
                         f"{metrics['avg_ms']:.2f}",
                         f"{metrics['max_ms']:.2f}",
+                        f"{metrics['avg_mib_s']:.2f}" if metrics.get("avg_mib_s") is not None else "",
                         "",
                         "",
                         "",
@@ -415,6 +469,7 @@ def write_csv_report(output_path: Path, scenarios: list[dict[str, object]]) -> N
                             f"{metrics['min_ms']:.2f}",
                             f"{metrics['avg_ms']:.2f}",
                             f"{metrics['max_ms']:.2f}",
+                            f"{metrics['avg_mib_s']:.2f}" if metrics.get("avg_mib_s") is not None else "",
                             f"{float(delta['delta_ms']):.2f}" if delta else "",
                             f"{float(delta['delta_pct']):.2f}" if delta else "",
                             delta["status"] if delta else "",

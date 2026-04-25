@@ -46,7 +46,7 @@ Basic run:
 python bench_backends.py --file big.txt
 ```
 
-`bench_backends.py` passes `--speed` to benchmarked `fastawc` runs by default. Use `--no-speed` when comparing against an older binary that does not support throughput output.
+`bench_backends.py` passes `--speed` to benchmarked `fastawc` runs by default and reports average `MiB/s` when the binary prints it. Use `--no-speed` when comparing against an older binary that does not support throughput output.
 
 Strict compatibility run:
 ```bash
