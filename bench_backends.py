@@ -21,15 +21,25 @@ DEFAULT_UTF8_LINE = "Привет мир 12345\n"
 DEFAULT_WHITESPACE_LINE = "word\t \u00a0\u3000word  \t\u200dword\n"
 DEFAULT_SHORT_LINE = "x\n"
 DEFAULT_LONG_LINE = ("The quick brown fox jumps over the lazy dog 1234567890 " * 256) + "\n"
+DEFAULT_CYRILLIC_LINE = "Быстрый счётчик строк и слов проверяет кириллицу 12345\n"
+DEFAULT_CJK_LINE = "快速文本计数器处理中文和日本語の行 12345\n"
+DEFAULT_EMOJI_LINE = "emoji 😀😃😄😁😆 text 🧪📚🚀 words\n"
+DEFAULT_TABS_LINE = "col1\tcol2\tcol3\tcol4\tcol5\n"
+DEFAULT_CONTROLS_LINE = "alpha\x01beta\x02gamma\x7fdelta\n"
+DEFAULT_NOSPACES_LINE = ("abcdefghijklmnopqrstuvwxyz0123456789" * 32) + "\n"
+DEFAULT_DENSE_NEWLINES_LINE = "a\nb\nc\nd\ne\nf\ng\nh\n"
 SCENARIOS: dict[str, tuple[str, ...]] = {
-    "full": DEFAULT_ARGS,
-    "classic": ("-l", "-w", "-c"),
-    "unicode": ("-m", "-L"),
-    "bytes": ("-c",),
-    "fast-full": DEFAULT_ARGS,
-    "fast-classic": ("-l", "-w", "-c"),
-    "strict-full": ("--strict", "-l", "-w", "-c", "-m", "-L"),
-    "strict-classic": ("--strict", "-l", "-w", "-c"),
+	"full": DEFAULT_ARGS,
+	"classic": ("-l", "-w", "-c"),
+	"lines": ("-l",),
+	"unicode": ("-m", "-L"),
+	"bytes": ("-c",),
+	"fast-full": DEFAULT_ARGS,
+	"fast-classic": ("-l", "-w", "-c"),
+	"fast-lines": ("-l",),
+	"strict-full": ("--strict", "-l", "-w", "-c", "-m", "-L"),
+	"strict-classic": ("--strict", "-l", "-w", "-c"),
+	"strict-lines": ("--strict", "-l"),
 }
 
 
@@ -62,6 +72,17 @@ def parse_args() -> argparse.Namespace:
         description="Benchmark fastawc backends on a target file and report min/avg/max timings."
     )
     parser.add_argument("--binary", help="Path to the fastawc binary.")
+    parser.add_argument("--baseline-binary", help="Path to a baseline fastawc binary for comparison mode.")
+    parser.add_argument(
+        "--candidate-binary",
+        help="Path to a candidate fastawc binary for comparison mode. Defaults to --binary or auto-detection.",
+    )
+    parser.add_argument(
+        "--noise-pct",
+        type=float,
+        default=2.0,
+        help="Delta threshold treated as noise in comparison mode. Default: %(default)s",
+    )
     parser.add_argument(
         "--file",
         default="big.txt",
@@ -80,7 +101,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--generate-profile",
-        choices=("ascii", "mixed", "utf8", "whitespace", "longlines", "shortlines"),
+        choices=(
+            "ascii",
+            "mixed",
+            "utf8",
+            "whitespace",
+            "longlines",
+            "shortlines",
+            "cyrillic",
+            "cjk",
+            "emoji",
+            "tabs",
+            "controls",
+            "nospaces",
+            "dense-newlines",
+        ),
         default="ascii",
         help="Content profile for generated test data. Default: %(default)s",
     )
@@ -264,10 +299,51 @@ def make_summary(results: dict[str, list[float]]) -> dict[str, dict[str, float |
     }
 
 
+def make_comparison_summary(
+    baseline: dict[str, dict[str, float | int]],
+    candidate: dict[str, dict[str, float | int]],
+    noise_pct: float,
+) -> dict[str, dict[str, float | str]]:
+    comparison: dict[str, dict[str, float | str]] = {}
+    for backend, baseline_metrics in baseline.items():
+        candidate_metrics = candidate[backend]
+        baseline_avg = float(baseline_metrics["avg_ms"])
+        candidate_avg = float(candidate_metrics["avg_ms"])
+        delta_ms = candidate_avg - baseline_avg
+        delta_pct = (delta_ms / baseline_avg * 100.0) if baseline_avg != 0.0 else 0.0
+        if abs(delta_pct) <= noise_pct:
+            status = "noise"
+        else:
+            status = "faster" if delta_ms < 0.0 else "slower"
+        comparison[backend] = {
+            "baseline_avg_ms": baseline_avg,
+            "candidate_avg_ms": candidate_avg,
+            "delta_ms": delta_ms,
+            "delta_pct": delta_pct,
+            "status": status,
+        }
+    return comparison
+
+
+def print_comparison(comparison: dict[str, dict[str, float | str]]) -> None:
+    header = f"{'backend':<10} {'base avg':>12} {'cand avg':>12} {'delta ms':>12} {'delta %':>10} {'status':>8}"
+    print(header)
+    print("-" * len(header))
+    for backend, metrics in comparison.items():
+        print(
+            f"{backend:<10} "
+            f"{float(metrics['baseline_avg_ms']):>12.2f} "
+            f"{float(metrics['candidate_avg_ms']):>12.2f} "
+            f"{float(metrics['delta_ms']):>12.2f} "
+            f"{float(metrics['delta_pct']):>9.2f}% "
+            f"{str(metrics['status']):>8}"
+        )
+
+
 def write_json_report(
     output_path: Path,
     *,
-    binary: Path,
+    binary: object,
     input_file: Path,
     runs: int,
     warmup: int,
@@ -276,7 +352,7 @@ def write_json_report(
     scenarios: list[dict[str, object]],
 ) -> None:
     payload = {
-        "binary": str(binary),
+        "binary": str(binary) if isinstance(binary, Path) else binary,
         "file": str(input_file),
         "runs": runs,
         "warmup": warmup,
@@ -290,19 +366,54 @@ def write_json_report(
 def write_csv_report(output_path: Path, scenarios: list[dict[str, object]]) -> None:
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["scenario", "backend", "runs", "min_ms", "avg_ms", "max_ms"])
+        writer.writerow([
+            "scenario",
+            "backend",
+            "binary_role",
+            "runs",
+            "min_ms",
+            "avg_ms",
+            "max_ms",
+            "delta_ms",
+            "delta_pct",
+            "status",
+        ])
         for scenario in scenarios:
             scenario_name = scenario["name"]
-            summary = scenario["summary"]
-            for backend, metrics in summary.items():
-                writer.writerow([
-                    scenario_name,
-                    backend,
-                    metrics["runs"],
-                    f"{metrics['min_ms']:.2f}",
-                    f"{metrics['avg_ms']:.2f}",
-                    f"{metrics['max_ms']:.2f}",
-                ])
+            if "summary" in scenario:
+                summary = scenario["summary"]
+                for backend, metrics in summary.items():
+                    writer.writerow([
+                        scenario_name,
+                        backend,
+                        "single",
+                        metrics["runs"],
+                        f"{metrics['min_ms']:.2f}",
+                        f"{metrics['avg_ms']:.2f}",
+                        f"{metrics['max_ms']:.2f}",
+                        "",
+                        "",
+                        "",
+                    ])
+            else:
+                baseline_summary = scenario["baseline_summary"]
+                candidate_summary = scenario["candidate_summary"]
+                comparison = scenario["comparison"]
+                for role, summary in (("baseline", baseline_summary), ("candidate", candidate_summary)):
+                    for backend, metrics in summary.items():
+                        delta = comparison[backend] if role == "candidate" else None
+                        writer.writerow([
+                            scenario_name,
+                            backend,
+                            role,
+                            metrics["runs"],
+                            f"{metrics['min_ms']:.2f}",
+                            f"{metrics['avg_ms']:.2f}",
+                            f"{metrics['max_ms']:.2f}",
+                            f"{float(delta['delta_ms']):.2f}" if delta else "",
+                            f"{float(delta['delta_pct']):.2f}" if delta else "",
+                            delta["status"] if delta else "",
+                        ])
 
 
 def resolve_scenarios(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
@@ -324,6 +435,20 @@ def build_profile_chunk(profile: str) -> bytes:
         return (DEFAULT_LONG_LINE * 128).encode("utf-8")
     if profile == "shortlines":
         return (DEFAULT_SHORT_LINE * (1 << 16)).encode("utf-8")
+    if profile == "cyrillic":
+        return (DEFAULT_CYRILLIC_LINE * 4096).encode("utf-8")
+    if profile == "cjk":
+        return (DEFAULT_CJK_LINE * 4096).encode("utf-8")
+    if profile == "emoji":
+        return (DEFAULT_EMOJI_LINE * 4096).encode("utf-8")
+    if profile == "tabs":
+        return (DEFAULT_TABS_LINE * 8192).encode("utf-8")
+    if profile == "controls":
+        return (DEFAULT_CONTROLS_LINE * 8192).encode("utf-8")
+    if profile == "nospaces":
+        return (DEFAULT_NOSPACES_LINE * 512).encode("utf-8")
+    if profile == "dense-newlines":
+        return (DEFAULT_DENSE_NEWLINES_LINE * (1 << 14)).encode("utf-8")
     raise ValueError(f"unknown generate profile: {profile}")
 
 
@@ -350,7 +475,16 @@ def generate_test_file(path: Path, size_mb: int, profile: str) -> tuple[int, str
 
 def main() -> int:
     args = parse_args()
-    binary = resolve_binary(args.binary)
+    comparison_mode = args.baseline_binary is not None
+    if comparison_mode:
+        baseline_binary = resolve_binary(args.baseline_binary)
+        candidate_binary = resolve_binary(args.candidate_binary or args.binary)
+        binary: Path | None = None
+    else:
+        baseline_binary = None
+        candidate_binary = None
+        binary = resolve_binary(args.binary)
+
     input_file = Path(args.file).expanduser()
     if args.runs <= 0:
         raise ValueError("--runs must be > 0")
@@ -368,7 +502,12 @@ def main() -> int:
             f"input file not found: {input_file}; pass --generate-test-file to create it automatically"
         )
 
-    print(f"binary : {binary}")
+    if comparison_mode:
+        print(f"baseline : {baseline_binary}")
+        print(f"candidate: {candidate_binary}")
+        print(f"noise pct: {args.noise_pct:.2f}")
+    else:
+        print(f"binary : {binary}")
     print(f"file   : {input_file.resolve()}")
     if generated_info is not None:
         generated_bytes, generated_profile = generated_info
@@ -387,27 +526,71 @@ def main() -> int:
         print(f"scenario: {scenario_name}")
         print(f"args    : {' '.join(scenario_args)}")
         print()
-        results = benchmark_backends(
-            binary=binary,
-            input_file=input_file,
-            backends=args.backends,
-            runs=args.runs,
-            warmup=args.warmup,
-            extra_args=scenario_args,
-            interleave=args.interleave,
-            affinity=affinity,
-        )
-        print_results(results)
-        scenario_reports.append({
-            "name": scenario_name,
-            "args": scenario_args,
-            "summary": make_summary(results),
-        })
+        if comparison_mode:
+            assert baseline_binary is not None
+            assert candidate_binary is not None
+            baseline_results = benchmark_backends(
+                binary=baseline_binary,
+                input_file=input_file,
+                backends=args.backends,
+                runs=args.runs,
+                warmup=args.warmup,
+                extra_args=scenario_args,
+                interleave=args.interleave,
+                affinity=affinity,
+            )
+            candidate_results = benchmark_backends(
+                binary=candidate_binary,
+                input_file=input_file,
+                backends=args.backends,
+                runs=args.runs,
+                warmup=args.warmup,
+                extra_args=scenario_args,
+                interleave=args.interleave,
+                affinity=affinity,
+            )
+            baseline_summary = make_summary(baseline_results)
+            candidate_summary = make_summary(candidate_results)
+            comparison = make_comparison_summary(baseline_summary, candidate_summary, args.noise_pct)
+            print_comparison(comparison)
+            scenario_reports.append({
+                "name": scenario_name,
+                "args": scenario_args,
+                "baseline_summary": baseline_summary,
+                "candidate_summary": candidate_summary,
+                "comparison": comparison,
+            })
+        else:
+            assert binary is not None
+            results = benchmark_backends(
+                binary=binary,
+                input_file=input_file,
+                backends=args.backends,
+                runs=args.runs,
+                warmup=args.warmup,
+                extra_args=scenario_args,
+                interleave=args.interleave,
+                affinity=affinity,
+            )
+            print_results(results)
+            scenario_reports.append({
+                "name": scenario_name,
+                "args": scenario_args,
+                "summary": make_summary(results),
+            })
 
     if args.json_out:
+        binary_report: object
+        if comparison_mode:
+            binary_report = {
+                "baseline": str(baseline_binary),
+                "candidate": str(candidate_binary),
+            }
+        else:
+            binary_report = binary
         write_json_report(
             Path(args.json_out).expanduser(),
-            binary=binary,
+            binary=binary_report,
             input_file=input_file.resolve(),
             runs=args.runs,
             warmup=args.warmup,

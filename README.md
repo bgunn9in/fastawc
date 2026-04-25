@@ -26,8 +26,14 @@ Optional environment overrides:
 - `FASTAWC_MIN_PARALLEL_MB=<n>`
 - `FASTAWC_BYTES_PER_WORKER_MB=<n>`
 - `FASTAWC_TARGET_CHUNK_MB=<n>`
+- `FASTAWC_NO_MMAP=1`
+- `FASTAWC_STREAM_BUFFER_MB=<n>`
+- `FASTAWC_WILLNEED=1`
 
 `FASTAWC_AUTOTUNE=1` runs a short startup calibration for strict `-m/-L` workloads and picks the faster backend for the current CPU between `scalar` and `avx2`.
+`FASTAWC_NO_MMAP=1` forces regular files through the streaming path for I/O comparison benchmarks.
+`FASTAWC_STREAM_BUFFER_MB=<n>` changes the streaming read buffer size for stdin, pipes, and no-mmap file benchmarks.
+`FASTAWC_WILLNEED=1` enables aggressive OS readahead hints where supported.
 
 ## Notes
 - Target floor for the fast backend is AVX2-class CPUs such as Intel Core i7-6700.
@@ -68,12 +74,15 @@ python bench_backends.py --file big.txt --runs 5 --warmup 1 --interleave --affin
 Predefined scenarios:
 - `full`: `-l -w -c -m -L`
 - `classic`: `-l -w -c`
+- `lines`: `-l`
 - `unicode`: `-m -L`
 - `bytes`: `-c`
 - `fast-full`: `-l -w -c -m -L`
 - `fast-classic`: `-l -w -c`
+- `fast-lines`: `-l`
 - `strict-full`: `--strict -l -w -c -m -L`
 - `strict-classic`: `--strict -l -w -c`
+- `strict-lines`: `--strict -l`
 
 Generated test data profiles:
 - `ascii`: ASCII-heavy English text
@@ -82,3 +91,10 @@ Generated test data profiles:
 - `whitespace`: whitespace-pathological input with tabs and Unicode spaces
 - `longlines`: long-line-heavy input for `-L` stress
 - `shortlines`: many short lines for newline-density stress
+- `cyrillic`: mostly 2-byte Cyrillic UTF-8 text
+- `cjk`: mostly 3-byte CJK text with wide display-width characters
+- `emoji`: 4-byte UTF-8-heavy text for supplementary-plane stress
+- `tabs`: ASCII tab-heavy text for strict `-L`
+- `controls`: ASCII control-heavy text for zero-width handling
+- `nospaces`: long words with rare whitespace
+- `dense-newlines`: very short lines for newline-density stress

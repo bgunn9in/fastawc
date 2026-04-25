@@ -16,8 +16,6 @@ namespace fastawc {
 
 namespace {
 
-constexpr unsigned kMaxParallelWorkers = 8;
-
 bool equals_ascii_ci(const std::string_view lhs, const std::string_view rhs) noexcept {
 	if (lhs.size() != rhs.size()) {
 		return false;
@@ -176,7 +174,6 @@ RuntimeConfig choose_runtime_config(const Backend& backend, const ScanModeKind s
 		minParallelFileSize = backend.isAvx2 ? (32ull << 20) : (24ull << 20);
 		minBytesPerWorker = backend.isAvx2 ? (24ull << 20) : (16ull << 20);
 		targetChunkSize = backend.isAvx2 ? (24ull << 20) : (16ull << 20);
-		hardwareWorkers = std::min(hardwareWorkers, 6u);
 	}
 	else if (strictClassic) {
 		minParallelFileSize = backend.isAvx2 ? (32ull << 20) : (48ull << 20);

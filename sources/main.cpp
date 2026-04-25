@@ -3,11 +3,14 @@
 #include "thread_pool.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
+#include <system_error>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,6 +20,7 @@ namespace fastawc {
 namespace {
 
 constexpr size_t kChunkAlignment = 2u << 20;
+constexpr size_t kMaxStreamBufferSize = 1024ull << 20;
 constexpr const char* kVersionString = "fastawc 0.1.0";
 
 struct alignas(64) ChunkResult {
@@ -280,10 +284,11 @@ ChunkResult process_memory_chunk(
 	return result;
 }
 
-void merge_chunk_results(const std::vector<ChunkResult>& chunks, Counts& out, const bool countMaxLine) {
+void merge_chunk_results(const ChunkResult* const chunks, const unsigned chunkCount, Counts& out, const bool countMaxLine) {
 	uint64_t carriedLineLength = 0;
 
-	for (const ChunkResult& chunk : chunks) {
+	for (unsigned index = 0; index < chunkCount; ++index) {
+		const ChunkResult& chunk = chunks[index];
 		out.lineCount += chunk.counts.lineCount;
 		out.wordCount += chunk.counts.wordCount;
 		out.byteCount += chunk.counts.byteCount;
@@ -304,6 +309,23 @@ void merge_chunk_results(const std::vector<ChunkResult>& chunks, Counts& out, co
 	if (countMaxLine) {
 		out.maxLineLength = std::max(out.maxLineLength, carriedLineLength);
 	}
+}
+
+size_t choose_stream_buffer_size() noexcept {
+	const char* const raw = std::getenv("FASTAWC_STREAM_BUFFER_MB");
+	if (raw == nullptr || *raw == '\0') {
+		return kStreamBufferSize;
+	}
+
+	char* end = nullptr;
+	const unsigned long long value = std::strtoull(raw, &end, 10);
+	if (end == raw || *end != '\0' || value == 0) {
+		return kStreamBufferSize;
+	}
+
+	constexpr size_t kMaxStreamBufferMb = kMaxStreamBufferSize >> 20;
+	const size_t clamped = static_cast<size_t>(std::min<unsigned long long>(value, kMaxStreamBufferMb));
+	return clamped << 20;
 }
 
 void process_mapped_data(
@@ -344,21 +366,21 @@ void process_mapped_data(
 		ScanProcessor processor = nullptr;
 		bool countBytes = false;
 		bool countMaxLine = false;
-		std::vector<ChunkResult>* results = nullptr;
+		ChunkResult* results = nullptr;
 	};
 
 	const bool utf8Sensitive = (scanMode & (kScanWords | kScanChars | kScanMaxLine)) != 0;
-	std::vector<ChunkResult> results(workerCount);
-	std::vector<size_t> chunkStarts(workerCount);
-	std::vector<size_t> chunkEnds(workerCount);
-	JobContext context{ data, size, workerCount, scanKind, scanMode, processor, countBytes, countMaxLine, &results };
+	std::array<ChunkResult, kMaxParallelWorkers> results{};
+	std::array<size_t, kMaxParallelWorkers> chunkStarts{};
+	std::array<size_t, kMaxParallelWorkers> chunkEnds{};
+	JobContext context{ data, size, workerCount, scanKind, scanMode, processor, countBytes, countMaxLine, results.data() };
 
 	size_t chunkStart = 0;
 	for (unsigned index = 0; index < workerCount; ++index) {
 		const unsigned chunksLeft = workerCount - index;
 		const size_t remaining = size - chunkStart;
 		const size_t evenShare = remaining / chunksLeft;
-		const size_t targetSize = std::min(config.targetChunkSize, evenShare + static_cast<size_t>(remaining % chunksLeft != 0));
+		const size_t targetSize = evenShare + static_cast<size_t>(remaining % chunksLeft != 0);
 		const size_t chunkEnd = align_chunk_end(chunkStart, chunkStart + targetSize, size, chunksLeft, data, utf8Sensitive);
 		chunkStarts[index] = chunkStart;
 		chunkEnds[index] = chunkEnd;
@@ -370,7 +392,7 @@ void process_mapped_data(
 		const size_t chunkEnd = chunkEnds[index];
 		const ChunkBoundaryState initialBoundary = compute_chunk_boundary_state(context.data, chunkStart, context.scanKind);
 
-		(*context.results)[index] = process_memory_chunk(
+		context.results[index] = process_memory_chunk(
 			context.data + chunkStart,
 			chunkEnd - chunkStart,
 			initialBoundary,
@@ -381,7 +403,7 @@ void process_mapped_data(
 			context.countMaxLine);
 	});
 
-	merge_chunk_results(results, out, countMaxLine);
+	merge_chunk_results(results.data(), workerCount, out, countMaxLine);
 }
 
 void process_stream(
@@ -393,7 +415,8 @@ void process_stream(
 	const bool countMaxLine,
 	Counts& out)
 {
-	auto buffer = std::make_unique<uint8_t[]>(kStreamBufferSize);
+	const size_t bufferSize = choose_stream_buffer_size();
+	auto buffer = std::make_unique<uint8_t[]>(bufferSize);
 
 	if (processor == nullptr) {
 		if (!countBytes) {
@@ -401,7 +424,7 @@ void process_stream(
 		}
 
 		for (;;) {
-			const size_t readBytes = read_stream(source, buffer.get(), kStreamBufferSize);
+			const size_t readBytes = read_stream(source, buffer.get(), bufferSize);
 			if (readBytes == 0) {
 				return;
 			}
@@ -411,7 +434,7 @@ void process_stream(
 
 	ScanState state{};
 	for (;;) {
-		const size_t readBytes = read_stream(source, buffer.get(), kStreamBufferSize);
+		const size_t readBytes = read_stream(source, buffer.get(), bufferSize);
 		if (readBytes == 0) {
 			break;
 		}
@@ -430,6 +453,23 @@ void process_stream(
 	}
 }
 
+bool try_count_regular_file_bytes(const std::string& path, Counts& out) {
+	std::error_code error;
+	const std::filesystem::path filePath(path);
+	const bool regular = std::filesystem::is_regular_file(filePath, error);
+	if (error || !regular) {
+		return false;
+	}
+
+	const uintmax_t size = std::filesystem::file_size(filePath, error);
+	if (error || size > std::numeric_limits<uint64_t>::max()) {
+		return false;
+	}
+
+	out.byteCount = static_cast<uint64_t>(size);
+	return true;
+}
+
 bool process_path(
 	const std::string& path,
 	const ScanModeKind scanKind,
@@ -445,6 +485,10 @@ bool process_path(
 		FileSource source;
 		open_stdin(source);
 		process_stream(source, scanKind, scanMode, processor, countBytes, countMaxLine, out);
+		return true;
+	}
+
+	if (processor == nullptr && countBytes && try_count_regular_file_bytes(path, out)) {
 		return true;
 	}
 
@@ -742,6 +786,20 @@ bool env_flag_enabled(const char* const name) noexcept {
 	return value != "0" && value != "false" && value != "FALSE" && value != "False";
 }
 
+unsigned parse_repeat_count() noexcept {
+	const char* const raw = std::getenv("FASTAWC_REPEAT");
+	if (raw == nullptr || *raw == '\0') {
+		return 1;
+	}
+
+	char* end = nullptr;
+	const unsigned long value = std::strtoul(raw, &end, 10);
+	if (end == raw || *end != '\0' || value == 0) {
+		return 1;
+	}
+	return static_cast<unsigned>(std::min<unsigned long>(value, 1000000ul));
+}
+
 std::vector<uint8_t> make_autotune_buffer() {
 	static constexpr std::string_view kPattern =
 		"The Project Gutenberg eBook of War and Peace\r\n"
@@ -843,6 +901,7 @@ int main(int argc, char** argv) {
 	const Backend& backend = choose_execution_backend(options, scanMode);
 	const RuntimeConfig config = choose_runtime_config(backend, options.scanKind, scanMode);
 	ThreadPool pool(config.maxWorkers);
+	const unsigned repeatCount = parse_repeat_count();
 	const ScanProcessor processor =
 		options.scanKind == ScanModeKind::strict
 		? backend.selectStrictProcessor(scanMode)
@@ -854,8 +913,19 @@ int main(int argc, char** argv) {
 
 	for (const std::string& path : options.files) {
 		Counts current{};
-		if (!process_path(path, options.scanKind, scanMode, processor, options.optBytes, options.optMaxLine, config, pool, current)) {
-			hadErrors = true;
+		bool processed = false;
+		const unsigned iterations = path == "-" ? 1u : repeatCount;
+		for (unsigned iteration = 0; iteration < iterations; ++iteration) {
+			Counts iterationCounts{};
+			if (!process_path(path, options.scanKind, scanMode, processor, options.optBytes, options.optMaxLine, config, pool, iterationCounts)) {
+				hadErrors = true;
+				processed = false;
+				break;
+			}
+			current = iterationCounts;
+			processed = true;
+		}
+		if (!processed) {
 			continue;
 		}
 

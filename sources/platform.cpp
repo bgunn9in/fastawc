@@ -1,7 +1,9 @@
 #include "platform.h"
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <utility>
 
 #ifdef _WIN32
@@ -73,6 +75,16 @@ void prepare_stream(FILE* const file) noexcept {
 #endif
 }
 
+bool env_flag_enabled(const char* const name) noexcept {
+	const char* const raw = std::getenv(name);
+	if (raw == nullptr || *raw == '\0') {
+		return false;
+	}
+
+	const std::string_view value{ raw };
+	return value != "0" && value != "false" && value != "FALSE" && value != "False";
+}
+
 #ifdef _WIN32
 bool try_map_file_windows(const std::string& path, FileSource& source) noexcept {
 	HANDLE file = CreateFileA(
@@ -114,6 +126,13 @@ bool try_map_file_windows(const std::string& path, FileSource& source) noexcept 
 		return false;
 	}
 
+	if (env_flag_enabled("FASTAWC_WILLNEED")) {
+		WIN32_MEMORY_RANGE_ENTRY range{};
+		range.VirtualAddress = const_cast<uint8_t*>(source.data);
+		range.NumberOfBytes = source.size;
+		(void)PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
+	}
+
 	source.kind = FileSource::Kind::mapped;
 	return true;
 }
@@ -139,6 +158,12 @@ bool try_map_file_posix(const std::string& path, FileSource& source) noexcept {
 		return true;
 	}
 
+#if defined(POSIX_FADV_WILLNEED)
+	if (env_flag_enabled("FASTAWC_WILLNEED")) {
+		posix_fadvise(source.fd, 0, 0, POSIX_FADV_WILLNEED);
+	}
+#endif
+
 	void* view = mmap(nullptr, source.size, PROT_READ, MAP_PRIVATE, source.fd, 0);
 	if (view == MAP_FAILED) {
 		close(source.fd);
@@ -150,6 +175,11 @@ bool try_map_file_posix(const std::string& path, FileSource& source) noexcept {
 
 #if defined(MADV_SEQUENTIAL)
 	madvise(view, source.size, MADV_SEQUENTIAL);
+#endif
+#if defined(MADV_WILLNEED)
+	if (env_flag_enabled("FASTAWC_WILLNEED")) {
+		madvise(view, source.size, MADV_WILLNEED);
+	}
 #endif
 	source.data = static_cast<const uint8_t*>(view);
 	source.kind = FileSource::Kind::mapped;
@@ -196,12 +226,13 @@ FileSource::~FileSource() {
 bool open_regular_file(const std::string& path, FileSource& source, std::string& error) noexcept {
 	close_source(source);
 
+	const bool disableMapping = env_flag_enabled("FASTAWC_NO_MMAP");
 #ifdef _WIN32
-	if (try_map_file_windows(path, source)) {
+	if (!disableMapping && try_map_file_windows(path, source)) {
 		return true;
 	}
 #else
-	if (try_map_file_posix(path, source)) {
+	if (!disableMapping && try_map_file_posix(path, source)) {
 		return true;
 	}
 
@@ -209,6 +240,11 @@ bool open_regular_file(const std::string& path, FileSource& source, std::string&
 	if (source.fd >= 0) {
 #if defined(POSIX_FADV_SEQUENTIAL)
 		posix_fadvise(source.fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+#if defined(POSIX_FADV_WILLNEED)
+		if (env_flag_enabled("FASTAWC_WILLNEED")) {
+			posix_fadvise(source.fd, 0, 0, POSIX_FADV_WILLNEED);
+		}
 #endif
 		source.kind = FileSource::Kind::stream;
 		source.closeFd = true;

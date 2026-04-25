@@ -778,6 +778,16 @@ FASTAWC_FORCEINLINE uint32_t mask_bytes_ge_f032(const __m256i v) noexcept {
 	return static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpgt_epi8(v, _mm256_set1_epi8(static_cast<char>(0xEF)))));
 }
 
+FASTAWC_FORCEINLINE uint32_t mask_strict_unicode_space_leads32(const __m256i v) noexcept {
+	const __m256i c2 = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(static_cast<char>(0xC2)));
+	const __m256i e1 = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(static_cast<char>(0xE1)));
+	const __m256i e2 = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(static_cast<char>(0xE2)));
+	const __m256i e3 = _mm256_cmpeq_epi8(v, _mm256_set1_epi8(static_cast<char>(0xE3)));
+	const __m256i c2e1 = _mm256_or_si256(c2, e1);
+	const __m256i e2e3 = _mm256_or_si256(e2, e3);
+	return static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(c2e1, e2e3)));
+}
+
 FASTAWC_FORCEINLINE bool can_use_strict_ascii_display_fast_path(const __m256i v) noexcept {
 	return mask_ascii_tabs32(v) == 0;
 }
@@ -1082,6 +1092,12 @@ FASTAWC_FORCEINLINE void process_strict_avx2_dispatch_block(
 				nonAsciiMask,
 				out,
 				st)) {
+			return;
+		}
+	}
+	else if constexpr (CountWords) {
+		if (mask_strict_unicode_space_leads32(block) == 0) {
+			process_fast_avx2_word_block<CountLines, CountWords, CountChars, CountMaxLine>(block, out, st);
 			return;
 		}
 	}

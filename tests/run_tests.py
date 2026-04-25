@@ -138,10 +138,15 @@ def main() -> int:
         zwj = temp_dir / "zwj.txt"
         zwj.write_text("a\u200db\n", encoding="utf-8", newline="")
         expect_success(run(exe, ["--strict", "-L", str(zwj)]), f"2 {zwj}")
+        expect_success(run(exe, ["--strict", "-L", str(zwj)], {"FASTAWC_REPEAT": "3"}), f"2 {zwj}")
 
         mahjong = temp_dir / "mahjong.txt"
         mahjong.write_text("\U0001F004\n", encoding="utf-8", newline="")
         expect_success(run(exe, ["--strict", "-m", "-L", str(mahjong)]), f"2 2 {mahjong}")
+
+        emoji_mixed = temp_dir / "emoji_mixed.txt"
+        emoji_mixed.write_text("a\U0001F600b\n", encoding="utf-8", newline="")
+        expect_success(run(exe, ["--strict", "-m", "-L", str(emoji_mixed)]), f"4 4 {emoji_mixed}")
 
         cyrillic_combining = temp_dir / "cyrillic_combining.txt"
         cyrillic_combining.write_text("a\u0483b\n", encoding="utf-8", newline="")

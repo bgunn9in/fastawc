@@ -86,6 +86,7 @@ constexpr uint32_t kScanWords = 1u << 1;
 constexpr uint32_t kScanChars = 1u << 2;
 constexpr uint32_t kScanMaxLine = 1u << 3;
 
+constexpr unsigned kMaxParallelWorkers = 8;
 constexpr size_t kStreamBufferSize = 8u << 20;
 
 FASTAWC_FORCEINLINE constexpr uint32_t make_scan_mode(const Options& options) noexcept {
