@@ -66,6 +66,11 @@ Write machine-readable reports:
 python bench_backends.py --file big.txt --scenarios strict-full --json-out bench.json --csv-out bench.csv
 ```
 
+Compare two binaries:
+```bash
+python bench_backends.py --baseline-binary old/fastawc --candidate-binary build/Release/fastawc --file big.txt --scenarios classic strict-full --noise-pct 2
+```
+
 Split benchmark by workload shape:
 ```bash
 python bench_backends.py --file big.txt --runs 5 --warmup 1 --interleave --affinity 0-7 --scenarios full classic unicode bytes
