@@ -40,6 +40,7 @@ struct Options {
 	bool optBytes = false;
 	bool optChars = false;
 	bool optMaxLine = false;
+	bool showSpeed = false;
 	bool implicitStdin = false;
 	ScanModeKind scanKind = ScanModeKind::fast;
 	TotalMode totalMode = TotalMode::auto_mode;

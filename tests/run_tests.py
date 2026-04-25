@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,18 @@ def expect_success(proc: subprocess.CompletedProcess[str], expected_stdout: str)
 def expect_failure(proc: subprocess.CompletedProcess[str]) -> None:
     if proc.returncode == 0:
         fail("expected failure exit code")
+
+
+def expect_speed_output(proc: subprocess.CompletedProcess[str], count_prefix: str, label: str | None = None) -> None:
+    stdout = proc.stdout.strip()
+    stderr = proc.stderr.strip()
+    if proc.returncode != 0:
+        fail(f"expected success, got {proc.returncode}, stderr={stderr!r}")
+
+    suffix = "" if label is None else " " + re.escape(label)
+    pattern = rf"^{re.escape(count_prefix)} [0-9]+\.[0-9]{{2}} MiB/s{suffix}$"
+    if re.match(pattern, stdout) is None:
+        fail(f"speed output mismatch: pattern={pattern!r}, got={stdout!r}")
 
 
 def make_boundary_file(path: pathlib.Path, separator: bytes) -> None:
@@ -108,6 +121,7 @@ def main() -> int:
         dash_file = temp_dir / "-foo.txt"
         dash_file.write_text("x y\n", encoding="utf-8", newline="")
         expect_success(run(exe, ["--", str(dash_file)]), f"1 2 4 {dash_file}")
+        expect_speed_output(run(exe, ["--speed", "-c", "--", str(dash_file)]), "4", str(dash_file))
 
         env_parallel = {
             "FASTAWC_THREADS": "2",

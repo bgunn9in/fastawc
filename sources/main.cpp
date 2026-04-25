@@ -39,6 +39,8 @@ struct ParseResult {
 
 struct OutputRow {
 	Counts counts{};
+	long double processedBytes = 0.0L;
+	double elapsedSeconds = 0.0;
 	std::string label;
 	bool showLabel = false;
 };
@@ -590,6 +592,10 @@ ParseResult parse_options(int argc, char** argv) {
 				result.options.optMaxLine = true;
 				continue;
 			}
+			if (option == "speed") {
+				result.options.showSpeed = true;
+				continue;
+			}
 			if (option == "fast") {
 				result.options.scanKind = ScanModeKind::fast;
 				continue;
@@ -723,6 +729,24 @@ void print_value(const uint64_t value, const size_t width, bool& firstField) {
 	}
 }
 
+double throughput_mib_per_second(const OutputRow& row) noexcept {
+	if (row.elapsedSeconds <= 0.0 || row.processedBytes <= 0.0L) {
+		return 0.0;
+	}
+	return static_cast<double>(row.processedBytes / (1024.0L * 1024.0L) / row.elapsedSeconds);
+}
+
+void print_speed(const OutputRow& row, bool& firstField) {
+	const double speed = throughput_mib_per_second(row);
+	if (firstField) {
+		std::printf("%.2f MiB/s", speed);
+		firstField = false;
+	}
+	else {
+		std::printf(" %.2f MiB/s", speed);
+	}
+}
+
 void print_counts(const OutputRow& row, const Options& options, const size_t fieldWidth) {
 	bool firstField = true;
 
@@ -740,6 +764,9 @@ void print_counts(const OutputRow& row, const Options& options, const size_t fie
 	}
 	if (options.optMaxLine) {
 		print_value(row.counts.maxLineLength, fieldWidth, firstField);
+	}
+	if (options.showSpeed) {
+		print_speed(row, firstField);
 	}
 	if (row.showLabel) {
 		std::printf(" %s", row.label.c_str());
@@ -772,6 +799,7 @@ void print_help() {
 	std::puts("      --strict           use stricter wc-compatible counting semantics");
 	std::puts("      --mode=MODE        select fast or strict counting mode");
 	std::puts("      --total=WHEN       auto, always, only, never");
+	std::puts("      --speed            print processing throughput in MiB/s");
 	std::puts("      --help             display this help and exit");
 	std::puts("      --version          output version information and exit");
 }
@@ -906,6 +934,7 @@ int main(int argc, char** argv) {
 		options.scanKind == ScanModeKind::strict
 		? backend.selectStrictProcessor(scanMode)
 		: backend.selectFastProcessor(scanMode);
+	const bool countBytesForProcessing = options.optBytes || options.showSpeed;
 
 	std::vector<OutputRow> fileRows;
 	fileRows.reserve(options.files.size());
@@ -915,9 +944,10 @@ int main(int argc, char** argv) {
 		Counts current{};
 		bool processed = false;
 		const unsigned iterations = path == "-" ? 1u : repeatCount;
+		const auto started = options.showSpeed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
 		for (unsigned iteration = 0; iteration < iterations; ++iteration) {
 			Counts iterationCounts{};
-			if (!process_path(path, options.scanKind, scanMode, processor, options.optBytes, options.optMaxLine, config, pool, iterationCounts)) {
+			if (!process_path(path, options.scanKind, scanMode, processor, countBytesForProcessing, options.optMaxLine, config, pool, iterationCounts)) {
 				hadErrors = true;
 				processed = false;
 				break;
@@ -933,6 +963,11 @@ int main(int argc, char** argv) {
 		row.counts = current;
 		row.label = path == "-" ? std::string("-") : path;
 		row.showLabel = options.totalMode != TotalMode::only && !(options.implicitStdin && path == "-");
+		if (options.showSpeed) {
+			const auto finished = std::chrono::steady_clock::now();
+			row.elapsedSeconds = std::chrono::duration<double>(finished - started).count();
+			row.processedBytes = static_cast<long double>(current.byteCount) * static_cast<long double>(iterations);
+		}
 		fileRows.push_back(std::move(row));
 	}
 
@@ -953,6 +988,10 @@ int main(int argc, char** argv) {
 		totalRow.counts = accumulate_total(fileRows);
 		totalRow.label = "total";
 		totalRow.showLabel = options.totalMode != TotalMode::only;
+		for (const OutputRow& row : fileRows) {
+			totalRow.processedBytes += row.processedBytes;
+			totalRow.elapsedSeconds += row.elapsedSeconds;
+		}
 		rowsToPrint.push_back(std::move(totalRow));
 	}
 

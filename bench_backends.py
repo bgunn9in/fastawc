@@ -158,6 +158,11 @@ def parse_args() -> argparse.Namespace:
         default=list(DEFAULT_ARGS),
         help="Arguments passed to fastawc before the input file. Default: -l -w -c -m -L",
     )
+    parser.add_argument(
+        "--no-speed",
+        action="store_true",
+        help="Do not pass --speed to fastawc. By default benchmarked commands include --speed.",
+    )
     parser.add_argument("--json-out", help="Write benchmark results as JSON.")
     parser.add_argument("--csv-out", help="Write benchmark results as CSV.")
     return parser.parse_args()
@@ -422,6 +427,12 @@ def resolve_scenarios(args: argparse.Namespace) -> list[tuple[str, list[str]]]:
     return [("custom", list(args.args))]
 
 
+def benchmark_args(args: argparse.Namespace, scenario_args: list[str]) -> list[str]:
+    if args.no_speed or "--speed" in scenario_args:
+        return scenario_args
+    return ["--speed", *scenario_args]
+
+
 def build_profile_chunk(profile: str) -> bytes:
     if profile == "ascii":
         return DEFAULT_TEXT_LINE.encode("utf-8") * 4096
@@ -515,16 +526,18 @@ def main() -> int:
     print(f"runs   : {args.runs}")
     print(f"warmup : {args.warmup}")
     print(f"order  : {'interleaved' if args.interleave else 'grouped'}")
+    print(f"speed  : {'off' if args.no_speed else 'on'}")
     if affinity is not None:
         print(f"affinity: {','.join(str(cpu) for cpu in affinity)}")
     print()
 
     scenario_reports: list[dict[str, object]] = []
     for index, (scenario_name, scenario_args) in enumerate(scenarios):
+        command_args = benchmark_args(args, scenario_args)
         if index != 0:
             print()
         print(f"scenario: {scenario_name}")
-        print(f"args    : {' '.join(scenario_args)}")
+        print(f"args    : {' '.join(command_args)}")
         print()
         if comparison_mode:
             assert baseline_binary is not None
@@ -535,7 +548,7 @@ def main() -> int:
                 backends=args.backends,
                 runs=args.runs,
                 warmup=args.warmup,
-                extra_args=scenario_args,
+                extra_args=command_args,
                 interleave=args.interleave,
                 affinity=affinity,
             )
@@ -545,7 +558,7 @@ def main() -> int:
                 backends=args.backends,
                 runs=args.runs,
                 warmup=args.warmup,
-                extra_args=scenario_args,
+                extra_args=command_args,
                 interleave=args.interleave,
                 affinity=affinity,
             )
@@ -555,7 +568,7 @@ def main() -> int:
             print_comparison(comparison)
             scenario_reports.append({
                 "name": scenario_name,
-                "args": scenario_args,
+                "args": command_args,
                 "baseline_summary": baseline_summary,
                 "candidate_summary": candidate_summary,
                 "comparison": comparison,
@@ -568,14 +581,14 @@ def main() -> int:
                 backends=args.backends,
                 runs=args.runs,
                 warmup=args.warmup,
-                extra_args=scenario_args,
+                extra_args=command_args,
                 interleave=args.interleave,
                 affinity=affinity,
             )
             print_results(results)
             scenario_reports.append({
                 "name": scenario_name,
-                "args": scenario_args,
+                "args": command_args,
                 "summary": make_summary(results),
             })
 
