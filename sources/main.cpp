@@ -478,19 +478,23 @@ bool process_path(
 	const uint32_t scanMode,
 	const ScanProcessor processor,
 	const bool countBytes,
+	const bool countSpeedBytes,
 	const bool countMaxLine,
 	const RuntimeConfig& config,
 	ThreadPool& pool,
-	Counts& out)
+	Counts& out,
+	uint64_t& processedBytes)
 {
 	if (path == "-") {
 		FileSource source;
 		open_stdin(source);
-		process_stream(source, scanKind, scanMode, processor, countBytes, countMaxLine, out);
+		process_stream(source, scanKind, scanMode, processor, countBytes || countSpeedBytes, countMaxLine, out);
+		processedBytes = out.byteCount;
 		return true;
 	}
 
 	if (processor == nullptr && countBytes && try_count_regular_file_bytes(path, out)) {
+		processedBytes = out.byteCount;
 		return true;
 	}
 
@@ -502,10 +506,12 @@ bool process_path(
 	}
 
 	if (source.is_mapped()) {
+		processedBytes = source.size;
 		process_mapped_data(source.data, source.size, scanKind, scanMode, processor, countBytes, countMaxLine, config, pool, out);
 	}
 	else {
-		process_stream(source, scanKind, scanMode, processor, countBytes, countMaxLine, out);
+		process_stream(source, scanKind, scanMode, processor, countBytes || countSpeedBytes, countMaxLine, out);
+		processedBytes = out.byteCount;
 	}
 
 	return true;
@@ -934,7 +940,7 @@ int main(int argc, char** argv) {
 		options.scanKind == ScanModeKind::strict
 		? backend.selectStrictProcessor(scanMode)
 		: backend.selectFastProcessor(scanMode);
-	const bool countBytesForProcessing = options.optBytes || options.showSpeed;
+	const bool countSpeedBytes = options.showSpeed;
 
 	std::vector<OutputRow> fileRows;
 	fileRows.reserve(options.files.size());
@@ -945,13 +951,27 @@ int main(int argc, char** argv) {
 		bool processed = false;
 		const unsigned iterations = path == "-" ? 1u : repeatCount;
 		const auto started = options.showSpeed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+		uint64_t lastProcessedBytes = 0;
 		for (unsigned iteration = 0; iteration < iterations; ++iteration) {
 			Counts iterationCounts{};
-			if (!process_path(path, options.scanKind, scanMode, processor, countBytesForProcessing, options.optMaxLine, config, pool, iterationCounts)) {
+			uint64_t iterationProcessedBytes = 0;
+			if (!process_path(
+				path,
+				options.scanKind,
+				scanMode,
+				processor,
+				options.optBytes,
+				countSpeedBytes,
+				options.optMaxLine,
+				config,
+				pool,
+				iterationCounts,
+				iterationProcessedBytes)) {
 				hadErrors = true;
 				processed = false;
 				break;
 			}
+			lastProcessedBytes = iterationProcessedBytes;
 			current = iterationCounts;
 			processed = true;
 		}
@@ -966,7 +986,7 @@ int main(int argc, char** argv) {
 		if (options.showSpeed) {
 			const auto finished = std::chrono::steady_clock::now();
 			row.elapsedSeconds = std::chrono::duration<double>(finished - started).count();
-			row.processedBytes = static_cast<long double>(current.byteCount) * static_cast<long double>(iterations);
+			row.processedBytes = static_cast<long double>(lastProcessedBytes) * static_cast<long double>(iterations);
 		}
 		fileRows.push_back(std::move(row));
 	}
