@@ -163,6 +163,7 @@ RuntimeConfig choose_runtime_config(const Backend& backend, const ScanModeKind s
 		(scanMode & kScanWords) != 0 ||
 		(scanMode & kScanChars) != 0 ||
 		(scanMode & kScanMaxLine) != 0;
+	const bool fastUnicodeOnly = scanKind == ScanModeKind::fast && scanMode == (kScanChars | kScanMaxLine);
 	const bool strictHeavy = scanKind == ScanModeKind::strict && (scanMode & (kScanChars | kScanMaxLine)) != 0;
 	const bool strictClassic = scanKind == ScanModeKind::strict && !strictHeavy;
 
@@ -174,6 +175,11 @@ RuntimeConfig choose_runtime_config(const Backend& backend, const ScanModeKind s
 		minParallelFileSize = backend.isAvx2 ? (32ull << 20) : (24ull << 20);
 		minBytesPerWorker = backend.isAvx2 ? (24ull << 20) : (16ull << 20);
 		targetChunkSize = backend.isAvx2 ? (24ull << 20) : (16ull << 20);
+	}
+	else if (fastUnicodeOnly && backend.isAvx2) {
+		minParallelFileSize = 32ull << 20;
+		minBytesPerWorker = 24ull << 20;
+		targetChunkSize = 24ull << 20;
 	}
 	else if (strictClassic) {
 		minParallelFileSize = backend.isAvx2 ? (32ull << 20) : (48ull << 20);

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <clocale>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -43,6 +44,14 @@ struct OutputRow {
 	double elapsedSeconds = 0.0;
 	std::string label;
 	bool showLabel = false;
+};
+
+struct SampleProfile {
+	size_t sampledBytes = 0;
+	size_t nonAsciiBytes = 0;
+	size_t bytesGeF0 = 0;
+	size_t tabs = 0;
+	size_t newlines = 0;
 };
 
 FASTAWC_FORCEINLINE bool is_space_ascii(const uint8_t c) noexcept {
@@ -472,28 +481,34 @@ bool try_count_regular_file_bytes(const std::string& path, Counts& out) {
 	return true;
 }
 
+const Backend& choose_execution_backend(const Options& options, uint32_t scanMode);
+const Backend& choose_execution_backend_for_source(const Options& options, uint32_t scanMode, const FileSource& source);
+
 bool process_path(
 	const std::string& path,
-	const ScanModeKind scanKind,
+	const Options& options,
 	const uint32_t scanMode,
-	const ScanProcessor processor,
 	const bool countBytes,
 	const bool countSpeedBytes,
 	const bool countMaxLine,
-	const RuntimeConfig& config,
 	ThreadPool& pool,
 	Counts& out,
 	uint64_t& processedBytes)
 {
 	if (path == "-") {
+		const Backend& backend = choose_execution_backend(options, scanMode);
+		const ScanProcessor processor =
+			options.scanKind == ScanModeKind::strict
+			? backend.selectStrictProcessor(scanMode)
+			: backend.selectFastProcessor(scanMode);
 		FileSource source;
 		open_stdin(source);
-		process_stream(source, scanKind, scanMode, processor, countBytes || countSpeedBytes, countMaxLine, out);
+		process_stream(source, options.scanKind, scanMode, processor, countBytes || countSpeedBytes, countMaxLine, out);
 		processedBytes = out.byteCount;
 		return true;
 	}
 
-	if (processor == nullptr && countBytes && try_count_regular_file_bytes(path, out)) {
+	if (scanMode == 0 && countBytes && try_count_regular_file_bytes(path, out)) {
 		processedBytes = out.byteCount;
 		return true;
 	}
@@ -505,12 +520,19 @@ bool process_path(
 		return false;
 	}
 
+	const Backend& backend = choose_execution_backend_for_source(options, scanMode, source);
+	const RuntimeConfig config = choose_runtime_config(backend, options.scanKind, scanMode);
+	const ScanProcessor processor =
+		options.scanKind == ScanModeKind::strict
+		? backend.selectStrictProcessor(scanMode)
+		: backend.selectFastProcessor(scanMode);
+
 	if (source.is_mapped()) {
 		processedBytes = source.size;
-		process_mapped_data(source.data, source.size, scanKind, scanMode, processor, countBytes, countMaxLine, config, pool, out);
+		process_mapped_data(source.data, source.size, options.scanKind, scanMode, processor, countBytes, countMaxLine, config, pool, out);
 	}
 	else {
-		process_stream(source, scanKind, scanMode, processor, countBytes || countSpeedBytes, countMaxLine, out);
+		process_stream(source, options.scanKind, scanMode, processor, countBytes || countSpeedBytes, countMaxLine, out);
 		processedBytes = out.byteCount;
 	}
 
@@ -834,19 +856,64 @@ unsigned parse_repeat_count() noexcept {
 	return static_cast<unsigned>(std::min<unsigned long>(value, 1000000ul));
 }
 
-std::vector<uint8_t> make_autotune_buffer() {
-	static constexpr std::string_view kPattern =
-		"The Project Gutenberg eBook of War and Peace\r\n"
-		"ASCII text with smart quotes \xE2\x80\x9Cquoted\xE2\x80\x9D words and accents \xC3\xA9.\r\n"
-		"Tabs\tand wide chars \xE8\xA1\xA8 and combining e\xCC\x81.\r\n";
-
+std::vector<uint8_t> make_repeated_buffer(const std::string_view pattern, const size_t size) {
 	std::vector<uint8_t> buffer;
-	buffer.reserve(4u << 20);
-	while (buffer.size() < (4u << 20)) {
-		buffer.insert(buffer.end(), kPattern.begin(), kPattern.end());
+	buffer.reserve(size);
+	while (buffer.size() < size) {
+		buffer.insert(buffer.end(), pattern.begin(), pattern.end());
 	}
-	buffer.resize(4u << 20);
+	buffer.resize(size);
 	return buffer;
+}
+
+const std::vector<uint8_t>& autotune_ascii_classic_buffer() {
+	static constexpr size_t kAutotuneBufferSize = 2u << 20;
+	static const std::vector<uint8_t> asciiClassic = make_repeated_buffer(
+		"alpha beta gamma delta epsilon zeta eta theta\n"
+		"plain ASCII words with regular newline density\n",
+		kAutotuneBufferSize);
+	return asciiClassic;
+}
+
+const std::vector<uint8_t>& autotune_mixed_strict_classic_buffer() {
+	static constexpr size_t kAutotuneBufferSize = 2u << 20;
+	static const std::vector<uint8_t> mixedStrictClassic = make_repeated_buffer(
+		"ASCII words and punctuation, \xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82 "
+		"\xD0\xBC\xD0\xB8\xD1\x80, \xE4\xB8\xAD\xE6\x96\x87 words\n",
+		kAutotuneBufferSize);
+	return mixedStrictClassic;
+}
+
+const std::vector<uint8_t>& autotune_utf8_strict_full_buffer() {
+	static constexpr size_t kAutotuneBufferSize = 2u << 20;
+	static const std::vector<uint8_t> utf8StrictFull = make_repeated_buffer(
+		"smart quotes \xE2\x80\x9Cquoted\xE2\x80\x9D, accents e\xCC\x81, wide \xE8\xA1\xA8, "
+		"emoji \xF0\x9F\x98\x80, words\n",
+		kAutotuneBufferSize);
+	return utf8StrictFull;
+}
+
+const std::vector<uint8_t>& autotune_tab_strict_max_line_buffer() {
+	static constexpr size_t kAutotuneBufferSize = 2u << 20;
+	static const std::vector<uint8_t> tabStrictMaxLine = make_repeated_buffer(
+		"1234567\tX\tcolumn\n"
+		"12345678\tY\tcolumn\n"
+		"wide\t\xE8\xA1\xA8\ttext\n",
+		kAutotuneBufferSize);
+	return tabStrictMaxLine;
+}
+
+const std::vector<uint8_t>& autotune_buffer_for_workload(const ScanModeKind scanKind, const uint32_t scanMode) {
+	if (scanKind == ScanModeKind::strict) {
+		if ((scanMode & kScanMaxLine) != 0 && (scanMode & kScanChars) == 0) {
+			return autotune_tab_strict_max_line_buffer();
+		}
+		if ((scanMode & (kScanChars | kScanMaxLine)) != 0) {
+			return autotune_utf8_strict_full_buffer();
+		}
+		return autotune_mixed_strict_classic_buffer();
+	}
+	return autotune_ascii_classic_buffer();
 }
 
 uint64_t measure_backend_processor(
@@ -879,17 +946,45 @@ uint64_t measure_backend_processor(
 	return best;
 }
 
+uint64_t measure_autotune_workload(
+	const Backend& backend,
+	const ScanModeKind scanKind,
+	const uint32_t scanMode) noexcept
+{
+	const auto measureBuffer = [&](const std::vector<uint8_t>& buffer) noexcept {
+		return measure_backend_processor(backend, scanKind, scanMode, buffer.data(), buffer.size());
+	};
+
+	uint64_t total = measureBuffer(autotune_buffer_for_workload(scanKind, scanMode));
+	if (scanKind == ScanModeKind::strict) {
+		if ((scanMode & (kScanChars | kScanMaxLine)) != 0) {
+			total += measureBuffer(autotune_ascii_classic_buffer());
+		}
+		else {
+			total += measureBuffer(autotune_ascii_classic_buffer());
+		}
+	}
+	return total;
+}
+
 const Backend& autotune_backend_for_workload(const ScanModeKind scanKind, const uint32_t scanMode) {
-	static const std::vector<uint8_t> buffer = make_autotune_buffer();
 	const Backend& scalar = scalar_backend();
 #if defined(FASTAWC_HAS_AVX2_BACKEND) && FASTAWC_HAS_AVX2_BACKEND
 	if (!cpu_supports_avx2()) {
 		return scalar;
 	}
+	static const Backend* cache[32] = {};
+	const size_t cacheKey = (scanKind == ScanModeKind::strict ? 16u : 0u) | static_cast<size_t>(scanMode & 0x0Fu);
+	if (cache[cacheKey] != nullptr) {
+		return *cache[cacheKey];
+	}
+
 	const Backend& avx2 = avx2_backend();
-	const uint64_t scalarTime = measure_backend_processor(scalar, scanKind, scanMode, buffer.data(), buffer.size());
-	const uint64_t avx2Time = measure_backend_processor(avx2, scanKind, scanMode, buffer.data(), buffer.size());
-	return avx2Time < scalarTime ? avx2 : scalar;
+	const uint64_t scalarTime = measure_autotune_workload(scalar, scanKind, scanMode);
+	const uint64_t avx2Time = measure_autotune_workload(avx2, scanKind, scanMode);
+	const Backend& selected = avx2Time < scalarTime ? avx2 : scalar;
+	cache[cacheKey] = &selected;
+	return selected;
 #else
 	(void)scanKind;
 	(void)scanMode;
@@ -901,12 +996,57 @@ const Backend& choose_execution_backend(const Options& options, const uint32_t s
 	if (std::getenv("FASTAWC_BACKEND") != nullptr) {
 		return select_backend();
 	}
-	if (env_flag_enabled("FASTAWC_AUTOTUNE") &&
-		options.scanKind == ScanModeKind::strict &&
-		(scanMode & (kScanChars | kScanMaxLine)) != 0) {
+	if (env_flag_enabled("FASTAWC_AUTOTUNE") && scanMode != 0) {
 		return autotune_backend_for_workload(options.scanKind, scanMode);
 	}
 	return select_backend();
+}
+
+SampleProfile sample_prefix_profile(const uint8_t* const data, const size_t size) noexcept {
+	SampleProfile profile{};
+	profile.sampledBytes = std::min<size_t>(size, 1u << 20);
+	for (size_t i = 0; i < profile.sampledBytes; ++i) {
+		const uint8_t c = data[i];
+		profile.nonAsciiBytes += static_cast<size_t>(c >= 0x80u);
+		profile.bytesGeF0 += static_cast<size_t>(c >= 0xF0u);
+		profile.tabs += static_cast<size_t>(c == '\t');
+		profile.newlines += static_cast<size_t>(c == '\n');
+	}
+	return profile;
+}
+
+bool sample_prefers_scalar_backend(
+	const Options& options,
+	const uint32_t scanMode,
+	const FileSource& source) noexcept
+{
+	if (!source.is_mapped() || source.data == nullptr || source.size < (16u << 20)) {
+		return false;
+	}
+	if (options.scanKind != ScanModeKind::strict || (scanMode & (kScanChars | kScanMaxLine)) == 0) {
+		return false;
+	}
+
+	const SampleProfile profile = sample_prefix_profile(source.data, source.size);
+	return profile.sampledBytes != 0 && profile.nonAsciiBytes > (profile.sampledBytes / 2);
+}
+
+const Backend& choose_execution_backend_for_source(
+	const Options& options,
+	const uint32_t scanMode,
+	const FileSource& source)
+{
+	if (std::getenv("FASTAWC_BACKEND") != nullptr) {
+		return select_backend();
+	}
+#if defined(FASTAWC_HAS_AVX2_BACKEND) && FASTAWC_HAS_AVX2_BACKEND
+	if (env_flag_enabled("FASTAWC_AUTOTUNE") && sample_prefers_scalar_backend(options, scanMode, source)) {
+		return scalar_backend();
+	}
+#else
+	(void)source;
+#endif
+	return choose_execution_backend(options, scanMode);
 }
 
 } // namespace
@@ -915,6 +1055,10 @@ const Backend& choose_execution_backend(const Options& options, const uint32_t s
 
 int main(int argc, char** argv) {
 	using namespace fastawc;
+
+#ifndef _WIN32
+	(void)std::setlocale(LC_CTYPE, "");
+#endif
 
 	const ParseResult parsed = parse_options(argc, argv);
 	if (!parsed.error.empty()) {
@@ -932,14 +1076,10 @@ int main(int argc, char** argv) {
 
 	const Options& options = parsed.options;
 	const uint32_t scanMode = make_scan_mode(options);
-	const Backend& backend = choose_execution_backend(options, scanMode);
-	const RuntimeConfig config = choose_runtime_config(backend, options.scanKind, scanMode);
-	ThreadPool pool(config.maxWorkers);
+	const Backend& startupBackend = select_backend();
+	const RuntimeConfig startupConfig = choose_runtime_config(startupBackend, options.scanKind, scanMode);
+	ThreadPool pool(startupConfig.maxWorkers);
 	const unsigned repeatCount = parse_repeat_count();
-	const ScanProcessor processor =
-		options.scanKind == ScanModeKind::strict
-		? backend.selectStrictProcessor(scanMode)
-		: backend.selectFastProcessor(scanMode);
 	const bool countSpeedBytes = options.showSpeed;
 
 	std::vector<OutputRow> fileRows;
@@ -957,13 +1097,11 @@ int main(int argc, char** argv) {
 			uint64_t iterationProcessedBytes = 0;
 			if (!process_path(
 				path,
-				options.scanKind,
+				options,
 				scanMode,
-				processor,
 				options.optBytes,
 				countSpeedBytes,
 				options.optMaxLine,
-				config,
 				pool,
 				iterationCounts,
 				iterationProcessedBytes)) {

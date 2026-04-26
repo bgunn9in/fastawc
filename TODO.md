@@ -133,6 +133,72 @@ Progress:
 - Kept stdin and pipe inputs single-pass because they cannot be rewound safely.
 - Added regression coverage that repeated processing preserves visible counts.
 
+### [x] Add throughput reporting to the CLI and benchmark reports
+
+Hypothesis: benchmark runs should expose both elapsed subprocess time and the tool's own processing throughput so CPU/backend changes can be interpreted more directly.
+
+Target files:
+
+- `sources/main.cpp`
+- `headers/types.h`
+- `bench_backends.py`
+- `tests/run_tests.py`
+- `README.md`
+
+Plan:
+
+- Add `--speed` to print processing throughput in `MiB/s`.
+- Keep normal output unchanged unless `--speed` is explicitly requested.
+- Make `bench_backends.py` pass `--speed` by default.
+- Parse throughput from benchmarked runs and include it in console, JSON, and CSV output.
+- Keep `--no-speed` available for comparing against older binaries.
+
+Validation:
+
+- Add a regression test for `--speed` output format.
+- Run C++ regression tests.
+- Run benchmark smoke tests with default speed reporting and with `--no-speed`.
+
+Risk:
+
+- Throughput printing can distort small-file timings if it adds work to hot paths or forces extra stdout handling.
+
+Progress:
+
+- Added `--speed` CLI output as an extra field after selected count columns.
+- For mapped regular files, throughput now uses the known mapped file size without forcing byte counting in the scan path unless `-c` is requested.
+- `bench_backends.py` now enables `--speed` by default, reports `avg MiB/s`, and keeps `--no-speed` for compatibility.
+- Comparison reports include baseline/candidate `MiB/s` plus absolute and percent throughput deltas.
+- When `--no-speed` is used, `bench_backends.py` sends stdout to `DEVNULL` instead of reading a pipe.
+- README documents `--speed`, benchmark throughput reporting, and the difference between Python wall-clock timing and internal `fastawc` throughput.
+
+### [x] Refresh user-facing CLI documentation
+
+Hypothesis: README had benchmark examples but no compact command-line reference, which made new options such as `--speed` easy to miss.
+
+Target files:
+
+- `README.md`
+
+Plan:
+
+- Add a concise list of counting, mode, total, speed, help, and version options.
+- Document how `--speed` computes throughput.
+- Keep detailed benchmark examples in the benchmarking section.
+
+Validation:
+
+- Review README for consistency with parser-supported options.
+
+Risk:
+
+- Documentation can drift if options change. Keep the section compact and option-focused.
+
+Progress:
+
+- Added a CLI Options section covering `-l/-w/-c/-m/-L`, `--fast`, `--strict`, `--mode`, `--total`, `--speed`, `--help`, and `--version`.
+- Clarified that mapped regular-file throughput uses file size and does not add byte-count scan work unless `-c` is requested.
+
 ## P1: Strict AVX2 UTF-8 Hot Path
 
 ### Extend strict mixed-block fast path to valid 4-byte UTF-8
@@ -169,8 +235,19 @@ Progress:
 - Reverted the hot-path change after baseline comparison showed a strict-full AVX2 regression on the `emoji` profile.
 - Kept regression coverage for mixed ASCII plus a 4-byte emoji.
 - Next attempt should first add a cheap non-mutating prevalidation/structure mask so failed 32-byte attempts do not add a second pass over common mixed blocks.
+- Added conservative structural prevalidation and 4-byte decoding for word-including strict AVX2 mixed blocks.
+- Kept wordless `unicode` workloads on the previous fallback after benchmarks showed that 4-byte direct decoding did not help them reliably.
+- Added a forced-parallel chunk-boundary regression for a 4-byte emoji under strict `-m -L`.
+- Candidate outputs matched baseline on generated `mixed`, `utf8`, and `emoji` 128 MiB profiles for `strict-full`, `unicode`, and `strict-classic`.
+- Rechecked the wordless `unicode` path after structural validation, dispatch cleanup, and scalar/autotune work.
+- Broadened the structurally validated F0+ block shortcut to wordless strict char/max-line workloads as well.
+- Candidate outputs matched the micro-baseline on generated `emoji`, `utf8`, `mixed`, `cjk`, and `ascii` 128 MiB profiles for `unicode`, `strict-full`, and `strict-classic`.
+- Benchmark result summary against the pre-change micro-baseline:
+  - `emoji unicode` improved by about 4.8% in subprocess wall-clock and about 5.3% in internal MiB/s, which is useful but still close to the configured 5% noise threshold.
+  - `utf8`, `mixed`, `cjk`, and `ascii` neighboring checks stayed within noise.
+  - Explicit scalar backend is unaffected by this AVX2-only change.
 
-### Vectorize UTF-8 structural classification before scalar fallback
+### [x] Vectorize UTF-8 structural classification before scalar fallback
 
 Hypothesis: the current strict AVX2 path identifies non-ASCII bytes with `_mm256_movemask_epi8()` and then walks ASCII/non-ASCII spans. More structure can be extracted cheaply: lead-byte masks, continuation masks, and likely-valid 2/3/4-byte sequence starts.
 
@@ -200,6 +277,20 @@ Validation:
 Risk:
 
 - This is a high-risk hot path. Implement behind a small helper and keep the existing scalar fallback intact.
+
+Progress:
+
+- Added unsigned byte-range mask helpers for AVX2 classification.
+- Fixed the `>= F0` byte mask to use unsigned comparison semantics.
+- Added structural masks for continuation bytes, 2-byte leads, 3-byte leads, 4-byte leads, invalid lead bytes, and invalid constrained second bytes.
+- Added a conservative self-contained-block validator that rejects boundary-crossing and malformed sequences before the mutating decoder runs.
+- Extended the strict short UTF-8 mixed-block decoder to handle valid 4-byte sequences after structural prevalidation.
+- Initially allowing the old 2/3-byte decoder on ASCII+UTF-8 mixed blocks regressed `utf8 strict-full`; the path is now gated so the old 2/3-byte shortcut only handles fully non-ASCII blocks.
+- The new 4-byte shortcut is currently enabled only for word-including strict workloads, where it showed a stable win on `emoji`.
+- Regression checks versus clean baseline on 128 MiB generated profiles:
+  - `mixed`: `strict-full`, `unicode`, and `strict-classic` stayed within noise.
+  - `utf8`: `strict-full`, `unicode`, and `strict-classic` stayed within noise.
+  - `emoji`: `strict-full` improved by about 9%, `strict-classic` improved by about 6%, and `unicode` stayed within noise.
 
 ### [x] Add a strict word-only AVX2 Unicode whitespace path
 
@@ -274,7 +365,7 @@ Progress:
 - Added a regular-file metadata fast path for byte-only mode before opening or memory-mapping the file.
 - Kept stdin, pipes, and non-regular paths on the existing streaming fallback.
 
-### Optimize ASCII whitespace mask generation
+### [x] Optimize ASCII whitespace mask generation
 
 Hypothesis: `mask_whitespace32()` uses two shuffle LUTs and constructs constants inside the helper. Compilers often hoist them, but generated code should be verified. A compare-based classifier or static constant load may be faster on some CPUs.
 
@@ -298,6 +389,20 @@ Validation:
 Risk:
 
 - Some variants may be faster on one microarchitecture and slower on another. Prefer stable wins or compiler-specific branches only with evidence.
+
+Progress:
+
+- Replaced the AVX2 nibble-LUT ASCII whitespace classifier with a direct classifier:
+  - equality compare for ASCII space,
+  - unsigned range mask for `'\t'..'\r'`.
+- Reused the unsigned byte-range helper added for UTF-8 structural classification.
+- Built a micro-baseline from the already-validated current binary before this change and compared candidate against it.
+- Candidate outputs matched micro-baseline on generated `ascii`, `mixed`, `tabs`, and `nospaces` 128 MiB profiles for `classic`, `full`, `strict-classic`, and `strict-full`.
+- Benchmark result summary:
+  - `ascii classic` improved by about 5%.
+  - `tabs full` improved by about 6%.
+  - `mixed`, `tabs`, and `nospaces` checked scenarios stayed within noise except wins already covered by the strict tab path.
+  - No checked time regression exceeded the configured 5% threshold.
 
 ### [x] Add a newline-only AVX2 path for `-l`
 
@@ -331,7 +436,7 @@ Progress:
 
 ## P1: Strict Display Width
 
-### Expand staged Windows display-width fast paths
+### [x] Expand staged Windows display-width fast paths
 
 Hypothesis: Windows strict `-L` now has fast returns for common fixed-width ranges, but many frequent scripts still fall through to binary-search tables.
 
@@ -359,19 +464,41 @@ Risk:
 
 - Unicode width tables are subtle. Only add ranges with high confidence and tests for exclusions.
 
-### Avoid `wcwidth()` calls on POSIX for common ranges
+Progress:
+
+- Added Windows-only fixed-width fast returns for conservative Greek, Hebrew, Arabic, Arabic-Indic digit, Hiragana, and Katakana ranges.
+- Kept combining marks and zero-width ranges out of those fast returns; the Hiragana/Katakana wide shortcut remains after `is_zero_width_codepoint()`.
+- Added regression coverage for:
+  - Greek base letters plus a combining acute accent,
+  - Hebrew base letters plus a niqqud mark,
+  - Arabic base letters plus a kasra mark,
+  - Hiragana and Katakana wide display columns.
+- Candidate outputs matched the pre-change micro-baseline on generated Greek, Hebrew, Arabic, Kana, Cyrillic, CJK, and mixed 128 MiB files for `--strict -m -L` and `--strict -l -w -c -m -L`.
+- Benchmark result summary against the pre-change micro-baseline:
+  - `--strict -m -L` improved by about 57-60% on generated Greek, Hebrew, and Arabic profiles.
+  - `--strict -m -L` improved by about 15% on generated Kana.
+  - Generated Cyrillic and CJK `strict-full` and `unicode` stayed within noise.
+  - A first mixed-profile `strict-full` run showed a regression, but a 12-run repeat of `strict-full`, `strict-classic`, and `unicode` stayed within noise.
+
+### [x] Avoid `wcwidth()` calls on POSIX for common ranges
 
 Hypothesis: POSIX builds call `wcwidth()` for every non-ASCII code point in strict `-L`. Fast local checks for common ranges could mirror the Windows staged path and avoid libc call overhead.
 
 Target files:
 
 - `headers/engine_impl.h`
+- `sources/main.cpp`
+- `tests/run_tests.py`
+- `README.md`
 
 Plan:
 
+- Initialize POSIX `LC_CTYPE` from the process environment before calling `wcwidth()`.
 - Before calling `wcwidth()`, return known widths for safe common ranges:
-  - Latin-1 non-control characters.
   - Cyrillic base letters excluding combining marks.
+  - Hebrew base letters excluding marks.
+  - Arabic base letters and Arabic-Indic digits excluding combining marks.
+  - Hiragana and Katakana ranges that do not include combining marks.
   - CJK Unified Ideographs.
   - Hangul syllables.
 - Keep behavior conservative for ambiguous-width characters by falling back to `wcwidth()`.
@@ -383,9 +510,28 @@ Validation:
 
 Risk:
 
-- Locale-dependent `wcwidth()` behavior may differ for ambiguous-width characters. Do not shortcut ambiguous ranges.
+- Locale-dependent `wcwidth()` behavior may differ for ambiguous-width characters. Do not shortcut ambiguous ranges or Latin-1 until that behavior is explicitly specified.
 
-### Vectorize ASCII tab handling for strict `-L`
+Progress:
+
+- Attempted a conservative POSIX shortcut for Cyrillic, Hebrew, Arabic, CJK, Hangul, Hiragana, and Katakana ranges.
+- Reverted the shortcut before keeping it because WSL regression testing exposed an existing locale dependency: `wcwidth()` returns width 0 for Devanagari in the current test process, so adding local shortcuts would silently change POSIX behavior for only selected scripts.
+- Before this item is implemented, decide and test the POSIX locale policy explicitly:
+  - initialize a UTF-8 locale in the program before `wcwidth()`, or
+  - preserve current process-locale behavior and avoid local width shortcuts that bypass libc.
+- Keep this item open until POSIX Unicode width semantics are made explicit and benchmarked against that policy.
+- Chose the POSIX policy: initialize `LC_CTYPE` from the user's environment at startup so `wcwidth()` follows the active locale like system `wc`.
+- Updated the Devanagari regression test to account for platform display-width semantics: Windows keeps the built-in width-table expectation, POSIX follows `wcwidth()` and matches `wc -m -L` under WSL.
+- Reapplied a conservative POSIX pre-`wcwidth()` shortcut after the locale policy was explicit.
+- Candidate outputs matched the post-locale POSIX micro-baseline on generated Cyrillic, Hebrew, Arabic, Kana, CJK, and mixed 128 MiB files for `--strict -m -L` and `--strict -l -w -c -m -L`.
+- WSL regression tests passed after the locale/test update.
+- Benchmark result summary against the post-locale POSIX micro-baseline:
+  - `--strict -m -L` improved by about 14.5% on generated Kana and CJK profiles.
+  - `--strict -m -L` improved by about 5.4% on generated Arabic.
+  - `--strict -m -L` on generated Cyrillic, Hebrew, and mixed profiles stayed within noise.
+  - `strict-full` on generated Cyrillic, Arabic, Kana, CJK, and mixed profiles stayed within noise.
+
+### [x] Vectorize ASCII tab handling for strict `-L`
 
 Hypothesis: strict ASCII blocks with tabs fall back to scalar because tab width depends on current column. Files with periodic tabs pay a high cost even when everything else is ASCII.
 
@@ -407,6 +553,16 @@ Validation:
 Risk:
 
 - Tab width is stateful. This optimization must carefully preserve current line length across blocks and chunks.
+
+Progress:
+
+- Added an AVX2 ASCII display-width helper for strict blocks that contain tabs.
+- Kept line, word, and character counting vectorized for ASCII tab blocks.
+- Replaced per-byte scalar fallback with a mask-driven update that iterates only tab/newline positions and counts printable spans with popcount.
+- Preserved existing zero-width ASCII control handling and tab expansion based on the carried display column.
+- Added regression coverage for tabs around 8-column boundaries.
+- Candidate outputs matched baseline on generated `tabs`, `ascii`, `utf8`, and `mixed` 128 MiB profiles for `strict-full`, `unicode`, and `full`.
+- On the generated `tabs` 128 MiB profile, `strict-full` improved by about 41%; `unicode` and fast `full` stayed within noise.
 
 ## P1: Parallelism And Chunking
 
@@ -440,7 +596,7 @@ Progress:
 - Replaced per-file worker vectors with fixed-size stack arrays for chunk results and bounds.
 - Kept `ChunkResult` alignment intact.
 
-### Tune chunk sizing by measured backend throughput
+### [x] Tune chunk sizing by measured backend throughput
 
 Hypothesis: current chunk thresholds are static heuristics. Strict scalar, strict AVX2, fast AVX2, and byte-only workloads have different optimal parallelism.
 
@@ -481,6 +637,14 @@ Progress:
 - Checked the same larger-chunk settings on `mixed` 128 MiB and rejected them as default tuning because they regressed medium-file `full` and strict workloads.
 - Root-caused the large-file result to uneven chunk slicing when the selected worker count is capped by `maxWorkers`: early chunks used `targetChunkSize` and the final chunk received most of the file.
 - Kept the runtime thresholds unchanged for now; fixed the capped-worker chunk distribution separately and will retune thresholds after broader profile data.
+- Re-ran tuning after the balanced-worker, strict tab, and whitespace-mask changes.
+- Rejected broad `32/24/24` and `48/32/48` overrides because they still regressed `full` and strict-heavy scenarios on 128 MiB generated profiles.
+- Found a stable win for the narrow fast `-m -L` workload on AVX2 by using `minParallel=32 MiB`, `bytesPerWorker=24 MiB`, and `targetChunk=24 MiB`.
+- Applied that tuning only when `scanKind == fast`, backend is AVX2, and `scanMode == kScanChars | kScanMaxLine`.
+- Candidate outputs matched micro-baseline on generated `ascii`, `mixed`, `utf8`, and `emoji` 128 MiB profiles for `unicode`, `full`, `strict-full`, and `strict-classic`.
+- Benchmark result summary against the pre-tuning micro-baseline:
+  - `unicode` improved by about 14-15% on `ascii`, `mixed`, `utf8`, and `emoji`.
+  - Neighboring `full`, `strict-full`, and `strict-classic` checks stayed within noise after sequential rechecks.
 
 ### [x] Balance capped-worker chunk distribution
 
@@ -730,7 +894,7 @@ Progress:
 - Confirmed future backend work should stay limited to scalar and AVX2.
 - Verified `-DFASTAWC_ENABLE_AVX2_BACKEND=OFF` scalar-only Release build passes regression tests.
 
-### Add PGO build workflow
+### [x] Add PGO build workflow
 
 Hypothesis: this code is branch-heavy in strict mode and dispatch-heavy at startup. Profile-guided optimization may improve layout and branch prediction.
 
@@ -755,16 +919,27 @@ Risk:
 
 - PGO can overfit to training data. Keep it optional.
 
+Progress:
+
+- Added optional `FASTAWC_PGO_PHASE=off|generate|use` CMake support.
+- Kept the default as `off`, so normal Release/LTO builds are unchanged unless PGO is explicitly requested.
+- Added MSVC link options for instrumented and profile-use PGO phases.
+- Added GNU and Clang compile/link options for generate/use phases.
+- Documented the two-stage PGO workflow in README.
+- Built a WSL/GCC instrumented PGO binary, trained it on 64 MiB generated `ascii`, `mixed`, `utf8`, `whitespace`, `longlines`, and `shortlines` profiles, rebuilt with `-fprofile-use`, and passed regression tests.
+- Compared the WSL/GCC PGO binary against the LTO-only WSL binary on 128 MiB `ascii`, `mixed`, and `utf8` profiles for `classic`, `full`, `strict-full`, and `unicode`.
+- Result: all checked PGO deltas stayed within the configured 5% noise band. PGO is supported but should remain optional and target-machine validated before being used for release artifacts.
+
 ## P2: Runtime Selection And Autotuning
 
-### Extend autotune beyond strict `-m/-L`
+### [x] Extend autotune beyond strict `-m/-L`
 
 Hypothesis: `FASTAWC_AUTOTUNE=1` currently targets strict char/max-line workloads. Some machines or workloads may prefer scalar or AVX2 differently for strict classic, Unicode-heavy data, or very small files.
 
 Target files:
 
 - `sources/main.cpp`
-- `sources/runtime.cpp`
+- `tests/run_tests.py`
 
 Plan:
 
@@ -785,15 +960,29 @@ Risk:
 
 - Startup calibration can dominate small inputs. Never enable by default unless calibration becomes very cheap.
 
-### Sample file profile for backend and chunk decisions
+Progress:
+
+- Kept autotune opt-in behind `FASTAWC_AUTOTUNE=1`.
+- Added workload-specific calibration buffers:
+  - ASCII classic,
+  - mixed strict classic,
+  - UTF-8 strict full,
+  - tab-heavy strict `-L`.
+- Reduced individual calibration buffers to 2 MiB and made them branch-local so only the needed pattern is initialized.
+- Extended autotune to all scan modes instead of only strict `-m/-L`.
+- Cached selected backend per process for each `scanKind + scanMode` pair.
+- Added regression smoke coverage for `FASTAWC_AUTOTUNE=1` in fast classic, strict classic, and strict `-L`.
+- Benchmarked `FASTAWC_AUTOTUNE=1` against explicit `scalar` and `avx2` on 128 MiB generated `ascii`, `mixed`, and `utf8` profiles.
+- Found that static calibration alone cannot choose optimally for `strict-full`: ASCII/mixed prefer AVX2, while high non-ASCII UTF-8/CJK/emoji profiles prefer scalar. This is handled by the prefix-sampling item below.
+- Startup calibration remains visible in subprocess wall-clock timings, so autotune stays opt-in.
+
+### [x] Sample file profile for backend and chunk decisions
 
 Hypothesis: a small prefix sample can estimate ASCII ratio, newline density, tab density, and non-ASCII shape. Runtime could choose backend/chunk settings more accurately than static scan-mode heuristics.
 
 Target files:
 
 - `sources/main.cpp`
-- `sources/runtime.cpp`
-- `headers/types.h`
 
 Plan:
 
@@ -816,9 +1005,23 @@ Risk:
 
 - Sampling touches pages before the main scan and may hurt cold I/O. Make decisions conservative.
 
+Progress:
+
+- Added a mapped-file prefix sampler for `FASTAWC_AUTOTUNE=1`.
+- The sampler reads up to the first 1 MiB and counts sampled bytes, non-ASCII bytes, bytes `>= 0xF0`, tabs, and newlines.
+- Sampling is skipped for stdin, streaming inputs, files below 16 MiB, forced `FASTAWC_BACKEND`, and non-strict workloads.
+- For strict char/max-line workloads, Unicode-heavy samples with more than 50% non-ASCII bytes choose scalar directly instead of paying calibration and then selecting AVX2.
+- Moved backend/config/processor selection into per-file processing so mapped-file samples can affect backend choice without changing default non-autotuned behavior.
+- Avoided startup calibration when creating the thread pool; the pool now uses ordinary backend selection for worker-count sizing.
+- Validation:
+  - Windows and WSL regression tests passed.
+  - With `FASTAWC_AUTOTUNE=1`, generated `utf8 strict-full` now matches scalar timing and avoids the previous AVX2 mis-selection.
+  - Generated `ascii` and `mixed strict-full` still choose AVX2 by internal throughput.
+  - Default `auto` without `FASTAWC_AUTOTUNE` matches explicit AVX2 within noise on generated `ascii` and `mixed` profiles.
+
 ## P3: Engine Structure For Future Speed Work
 
-### Split hot engine code into focused headers
+### [x] Split hot engine code into focused headers
 
 Hypothesis: `headers/engine_impl.h` mixes Unicode tables, scalar decoders, AVX2 kernels, and dispatch. This makes hot-path optimization harder and increases accidental compile-time or codegen coupling.
 
@@ -846,7 +1049,16 @@ Risk:
 
 - Refactors can change inlining and code layout. Do this separately from functional optimizations.
 
-### Generate dispatch tables mechanically
+Progress:
+
+- Split Unicode whitespace, display-width, Windows width tables, and POSIX common width shortcuts from `headers/engine_impl.h` into `headers/engine_unicode.h`.
+- Kept the new header included inside the backend implementation namespace so function names, force-inline behavior, and backend-specific compilation remain unchanged.
+- Left scalar kernels, AVX2 kernels, and dispatch tables in `engine_impl.h` for separate future refactors; this avoids mixing several code-layout changes in one step.
+- Windows and WSL regression tests passed after the split.
+- Candidate outputs matched the pre-refactor root binary on generated `ascii`, `utf8`, and `mixed` 128 MiB files for `classic`, `strict-full`, and `unicode`.
+- Benchmark comparison against the pre-refactor root binary on generated `ascii` and `utf8` 128 MiB files stayed within the configured 5% noise band.
+
+### [x] Generate dispatch tables mechanically
 
 Hypothesis: dispatch tables are currently explicit and correct, but future backends and specialized paths will make manual tables easier to break.
 
@@ -870,15 +1082,14 @@ Risk:
 
 - Over-engineering dispatch can make code harder to read. Keep generated logic simple.
 
+Progress:
+
+- Replaced manually written function-pointer dispatch entries with constexpr helpers that derive template arguments from scan-mode bits.
+- Kept the same 16-entry table shape and the same `select_fast_processor()` / `select_strict_processor()` API.
+- Added compile-time checks for the null entry and full-mode entry.
+- Windows and WSL regression tests passed after the dispatch change.
+- Explicit scalar benchmark comparison against the pre-refactor root binary on generated `ascii` and `utf8` 128 MiB profiles stayed within the configured 5% noise band.
+
 ## Suggested Execution Order
 
-1. Add baseline comparison mode to `bench_backends.py`.
-2. Add the missing benchmark profiles, especially `cyrillic`, `cjk`, `emoji`, `tabs`, and `dense-newlines`.
-3. Implement 4-byte UTF-8 support in the strict AVX2 mixed-block fast path.
-4. Add strict word-only AVX2 Unicode whitespace detection.
-5. Tune strict display-width fast paths on Windows and POSIX.
-6. Add `-l` line-only specialization and explicit benchmark scenario.
-7. Replace per-file worker vectors with fixed-size stack storage.
-8. Run a chunk-size grid benchmark and update runtime defaults.
-9. Investigate streaming/no-mmap benchmarking and OS readahead hints.
-10. Keep backend work limited to scalar and AVX2; consider PGO only after the current paths are measured and stable.
+1. Consider splitting scalar and AVX2 implementation sections only after another clean benchmark checkpoint.

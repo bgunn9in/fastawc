@@ -7,10 +7,37 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
+Optional build switches:
+- `FASTAWC_ENABLE_LTO=ON|OFF`: enable link-time optimization for Release builds. Default: `ON`.
+- `FASTAWC_ENABLE_AVX2_BACKEND=ON|OFF`: build the AVX2 backend. Default: `ON`.
+- `FASTAWC_PGO_PHASE=off|generate|use`: optional profile-guided optimization phase. Default: `off`.
+
 The build produces a single `fastawc` binary with:
 - scalar backend for generic x86-64
 - AVX2 backend built as a separate object target and selected at runtime when the CPU/OS support it
 - Windows and POSIX file I/O paths with memory mapping for regular files and streaming fallback for stdin/pipes
+
+### Optional PGO Build
+PGO is a manual two-stage workflow and should be compared against the normal LTO build on the target machine before use.
+
+Instrumented build:
+```bash
+cmake -S . -B build-pgo -DCMAKE_BUILD_TYPE=Release -DFASTAWC_PGO_PHASE=generate
+cmake --build build-pgo --config Release
+```
+
+Train with representative inputs:
+```bash
+build-pgo/fastawc --strict -l -w -c -m -L big.txt
+build-pgo/fastawc -l -w -c -m -L big.txt
+build-pgo/fastawc -m -L big.txt
+```
+
+Optimized rebuild using the collected profile:
+```bash
+cmake -S . -B build-pgo -DCMAKE_BUILD_TYPE=Release -DFASTAWC_PGO_PHASE=use
+cmake --build build-pgo --config Release
+```
 
 ## Runtime Tuning
 Automatic backend and parallelism selection is enabled by default.
@@ -18,6 +45,8 @@ Automatic backend and parallelism selection is enabled by default.
 Counting modes:
 - `fast` is the default and prioritizes throughput
 - `strict` is slower and aims to be closer to `wc` semantics for `-w`, `-m`, and `-L`
+
+On POSIX systems, strict display-width counting initializes `LC_CTYPE` from the user's environment before calling `wcwidth()`, matching system `wc` locale behavior more closely. Windows uses the built-in Unicode width tables.
 
 Optional environment overrides:
 - `FASTAWC_BACKEND=scalar|avx2`
@@ -35,6 +64,22 @@ Optional environment overrides:
 `FASTAWC_STREAM_BUFFER_MB=<n>` changes the streaming read buffer size for stdin, pipes, and no-mmap file benchmarks.
 `FASTAWC_WILLNEED=1` enables aggressive OS readahead hints where supported.
 
+## CLI Options
+- `-l`, `--lines`: print newline counts.
+- `-w`, `--words`: print word counts.
+- `-c`, `--bytes`: print byte counts.
+- `-m`, `--chars`: print character counts.
+- `-L`, `--max-line-length`: print maximum display width.
+- `--fast`: use fast counting semantics. This is the default.
+- `--strict`: use stricter `wc`-compatible counting for words, characters, and display width.
+- `--mode=fast|strict`: select counting mode explicitly.
+- `--total=auto|always|only|never`: control total row output.
+- `--speed`: append processing throughput as `MiB/s`.
+- `--help`: display usage.
+- `--version`: print version information.
+
+When `--speed` is enabled, throughput is computed from bytes processed by `fastawc` and elapsed time inside the process. For mapped regular files this uses the known file size without adding byte-count work to the scan path unless `-c` is also requested.
+
 ## Notes
 - Target floor for the fast backend is AVX2-class CPUs such as Intel Core i7-6700.
 - `big.7z` is sample benchmark data.
@@ -47,6 +92,8 @@ python bench_backends.py --file big.txt
 ```
 
 `bench_backends.py` passes `--speed` to benchmarked `fastawc` runs by default and reports average `MiB/s` when the binary prints it. Use `--no-speed` when comparing against an older binary that does not support throughput output.
+
+In benchmark reports, `avg ms` is wall-clock time measured by the Python harness around the subprocess. `avg MiB/s` is parsed from `fastawc --speed` output and reflects the tool's internal processing interval.
 
 Strict compatibility run:
 ```bash

@@ -32,17 +32,17 @@ DEFAULT_NOSPACES_LINE = ("abcdefghijklmnopqrstuvwxyz0123456789" * 32) + "\n"
 DEFAULT_DENSE_NEWLINES_LINE = "a\nb\nc\nd\ne\nf\ng\nh\n"
 SPEED_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s+MiB/s")
 SCENARIOS: dict[str, tuple[str, ...]] = {
-	"full": DEFAULT_ARGS,
-	"classic": ("-l", "-w", "-c"),
-	"lines": ("-l",),
-	"unicode": ("-m", "-L"),
-	"bytes": ("-c",),
-	"fast-full": DEFAULT_ARGS,
-	"fast-classic": ("-l", "-w", "-c"),
-	"fast-lines": ("-l",),
-	"strict-full": ("--strict", "-l", "-w", "-c", "-m", "-L"),
-	"strict-classic": ("--strict", "-l", "-w", "-c"),
-	"strict-lines": ("--strict", "-l"),
+    "full": DEFAULT_ARGS,
+    "classic": ("-l", "-w", "-c"),
+    "lines": ("-l",),
+    "unicode": ("-m", "-L"),
+    "bytes": ("-c",),
+    "fast-full": DEFAULT_ARGS,
+    "fast-classic": ("-l", "-w", "-c"),
+    "fast-lines": ("-l",),
+    "strict-full": ("--strict", "-l", "-w", "-c", "-m", "-L"),
+    "strict-classic": ("--strict", "-l", "-w", "-c"),
+    "strict-lines": ("--strict", "-l"),
 }
 
 
@@ -236,6 +236,7 @@ def parse_speed(stdout: str) -> float | None:
 
 def run_once(binary: Path, input_file: Path, backend: str, extra_args: list[str], affinity: list[int] | None) -> RunSample:
     command = [str(binary), *extra_args, str(input_file)]
+    capture_stdout = "--speed" in extra_args
     env = os.environ.copy()
     if backend == "auto":
         env.pop("FASTAWC_BACKEND", None)
@@ -245,7 +246,7 @@ def run_once(binary: Path, input_file: Path, backend: str, extra_args: list[str]
     started = time.perf_counter()
     proc = subprocess.Popen(
         command,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         env=env,
         text=True,
@@ -263,7 +264,7 @@ def run_once(binary: Path, input_file: Path, backend: str, extra_args: list[str]
     if proc.returncode != 0:
         message = (stderr or "").strip() or f"exit code {proc.returncode}"
         raise RuntimeError(f"{backend}: {message}")
-    return RunSample(elapsed_ms=elapsed_ms, speed_mib_s=parse_speed(stdout or ""))
+    return RunSample(elapsed_ms=elapsed_ms, speed_mib_s=parse_speed(stdout or "") if capture_stdout else None)
 
 
 def benchmark_backends(
@@ -351,8 +352,20 @@ def make_comparison_summary(
         candidate_avg = float(candidate_metrics["avg_ms"])
         baseline_speed = baseline_metrics.get("avg_mib_s")
         candidate_speed = candidate_metrics.get("avg_mib_s")
+        baseline_speed_float = float(baseline_speed) if baseline_speed is not None else None
+        candidate_speed_float = float(candidate_speed) if candidate_speed is not None else None
         delta_ms = candidate_avg - baseline_avg
         delta_pct = (delta_ms / baseline_avg * 100.0) if baseline_avg != 0.0 else 0.0
+        speed_delta_mib_s = (
+            candidate_speed_float - baseline_speed_float
+            if baseline_speed_float is not None and candidate_speed_float is not None
+            else None
+        )
+        speed_delta_pct = (
+            speed_delta_mib_s / baseline_speed_float * 100.0
+            if speed_delta_mib_s is not None and baseline_speed_float not in (None, 0.0)
+            else None
+        )
         if abs(delta_pct) <= noise_pct:
             status = "noise"
         else:
@@ -363,8 +376,10 @@ def make_comparison_summary(
             "delta_ms": delta_ms,
             "delta_pct": delta_pct,
             "status": status,
-            "baseline_avg_mib_s": float(baseline_speed) if baseline_speed is not None else None,
-            "candidate_avg_mib_s": float(candidate_speed) if candidate_speed is not None else None,
+            "baseline_avg_mib_s": baseline_speed_float,
+            "candidate_avg_mib_s": candidate_speed_float,
+            "delta_mib_s": speed_delta_mib_s,
+            "delta_mib_s_pct": speed_delta_pct,
         }
     return comparison
 
@@ -373,7 +388,7 @@ def print_comparison(comparison: dict[str, dict[str, float | str | None]]) -> No
     header = f"{'backend':<10} {'base avg':>12} {'cand avg':>12} {'delta ms':>12} {'delta %':>10} {'status':>8}"
     has_speed = any(metrics.get("baseline_avg_mib_s") is not None or metrics.get("candidate_avg_mib_s") is not None for metrics in comparison.values())
     if has_speed:
-        header += f" {'base MiB/s':>12} {'cand MiB/s':>12}"
+        header += f" {'base MiB/s':>12} {'cand MiB/s':>12} {'delta MiB/s':>12} {'delta speed':>12}"
     print(header)
     print("-" * len(header))
     for backend, metrics in comparison.items():
@@ -388,11 +403,19 @@ def print_comparison(comparison: dict[str, dict[str, float | str | None]]) -> No
         if has_speed:
             base_speed = metrics.get("baseline_avg_mib_s")
             candidate_speed = metrics.get("candidate_avg_mib_s")
+            speed_delta = metrics.get("delta_mib_s")
+            speed_delta_pct = metrics.get("delta_mib_s_pct")
             row += (
                 f" {float(base_speed):>12.2f}" if base_speed is not None else f" {'':>12}"
             )
             row += (
                 f" {float(candidate_speed):>12.2f}" if candidate_speed is not None else f" {'':>12}"
+            )
+            row += (
+                f" {float(speed_delta):>12.2f}" if speed_delta is not None else f" {'':>12}"
+            )
+            row += (
+                f" {float(speed_delta_pct):>11.2f}%" if speed_delta_pct is not None else f" {'':>12}"
             )
         print(row)
 
@@ -434,6 +457,8 @@ def write_csv_report(output_path: Path, scenarios: list[dict[str, object]]) -> N
             "avg_mib_s",
             "delta_ms",
             "delta_pct",
+            "delta_mib_s",
+            "delta_mib_s_pct",
             "status",
         ])
         for scenario in scenarios:
@@ -450,6 +475,8 @@ def write_csv_report(output_path: Path, scenarios: list[dict[str, object]]) -> N
                         f"{metrics['avg_ms']:.2f}",
                         f"{metrics['max_ms']:.2f}",
                         f"{metrics['avg_mib_s']:.2f}" if metrics.get("avg_mib_s") is not None else "",
+                        "",
+                        "",
                         "",
                         "",
                         "",
@@ -472,6 +499,8 @@ def write_csv_report(output_path: Path, scenarios: list[dict[str, object]]) -> N
                             f"{metrics['avg_mib_s']:.2f}" if metrics.get("avg_mib_s") is not None else "",
                             f"{float(delta['delta_ms']):.2f}" if delta else "",
                             f"{float(delta['delta_pct']):.2f}" if delta else "",
+                            f"{float(delta['delta_mib_s']):.2f}" if delta and delta.get("delta_mib_s") is not None else "",
+                            f"{float(delta['delta_mib_s_pct']):.2f}" if delta and delta.get("delta_mib_s_pct") is not None else "",
                             delta["status"] if delta else "",
                         ])
 

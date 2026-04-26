@@ -111,6 +111,9 @@ def main() -> int:
         expect_success(run(exe, ["-L", str(compat)]), f"4 {compat}")
         expect_success(run(exe, ["--strict", "-L", str(compat)]), f"9 {compat}")
         expect_success(run(exe, ["--mode=strict", "-L", str(compat)]), f"9 {compat}")
+        expect_success(run(exe, ["-l", "-w", "-c", str(compat)], {"FASTAWC_AUTOTUNE": "1"}), f"2 3 9 {compat}")
+        expect_success(run(exe, ["--strict", "-l", "-w", "-c", str(compat)], {"FASTAWC_AUTOTUNE": "1"}), f"2 3 9 {compat}")
+        expect_success(run(exe, ["--strict", "-L", str(compat)], {"FASTAWC_AUTOTUNE": "1"}), f"9 {compat}")
 
         expect_failure(run(exe, ["--badopt"]))
 
@@ -138,6 +141,15 @@ def main() -> int:
         make_boundary_file(ideographic_space_file, "\u3000".encode("utf-8"))
         expect_success(run(exe, ["--strict", "-w", str(ideographic_space_file)], env_parallel), f"2 {ideographic_space_file}")
 
+        emoji_boundary = temp_dir / "emoji_boundary.txt"
+        make_boundary_file(emoji_boundary, "\U0001F600".encode("utf-8"))
+        expected_boundary_chars = str((3 * CHUNK_ALIGNMENT) - 1)
+        expected_boundary_width = str(2 * CHUNK_ALIGNMENT)
+        expect_success(
+            run(exe, ["--strict", "-m", "-L", str(emoji_boundary)], env_parallel),
+            f"{expected_boundary_chars} {expected_boundary_width} {emoji_boundary}",
+        )
+
         long_line = temp_dir / "long_line.txt"
         prefix = "a" * (CHUNK_ALIGNMENT - 1)
         suffix_spaces = " " * CHUNK_ALIGNMENT
@@ -145,9 +157,14 @@ def main() -> int:
         expected_width = str((CHUNK_ALIGNMENT - 1) + 1 + 2 + CHUNK_ALIGNMENT)
         expect_success(run(exe, ["--strict", "-L", str(long_line)], env_parallel), f"{expected_width} {long_line}")
 
+        tab_width = temp_dir / "tab_width.txt"
+        tab_width.write_text("1234567\tX\n12345678\tX\n", encoding="utf-8", newline="")
+        expect_success(run(exe, ["--strict", "-L", str(tab_width)]), f"17 {tab_width}")
+
         devanagari = temp_dir / "devanagari.txt"
         devanagari.write_text("\u0915\u093f\n", encoding="utf-8", newline="")
-        expect_success(run(exe, ["--strict", "-m", "-L", str(devanagari)]), f"3 1 {devanagari}")
+        devanagari_width = "1" if os.name == "nt" else "2"
+        expect_success(run(exe, ["--strict", "-m", "-L", str(devanagari)]), f"3 {devanagari_width} {devanagari}")
 
         zwj = temp_dir / "zwj.txt"
         zwj.write_text("a\u200db\n", encoding="utf-8", newline="")
@@ -165,6 +182,22 @@ def main() -> int:
         cyrillic_combining = temp_dir / "cyrillic_combining.txt"
         cyrillic_combining.write_text("a\u0483b\n", encoding="utf-8", newline="")
         expect_success(run(exe, ["--strict", "-L", str(cyrillic_combining)]), f"2 {cyrillic_combining}")
+
+        greek_combining = temp_dir / "greek_combining.txt"
+        greek_combining.write_text("\u03b1\u0301\u03b2\n", encoding="utf-8", newline="")
+        expect_success(run(exe, ["--strict", "-L", str(greek_combining)]), f"2 {greek_combining}")
+
+        hebrew_combining = temp_dir / "hebrew_combining.txt"
+        hebrew_combining.write_text("\u05d0\u05b0\u05d1\n", encoding="utf-8", newline="")
+        expect_success(run(exe, ["--strict", "-L", str(hebrew_combining)]), f"2 {hebrew_combining}")
+
+        arabic_combining = temp_dir / "arabic_combining.txt"
+        arabic_combining.write_text("\u0627\u0650\u0628\n", encoding="utf-8", newline="")
+        expect_success(run(exe, ["--strict", "-L", str(arabic_combining)]), f"2 {arabic_combining}")
+
+        kana_width = temp_dir / "kana_width.txt"
+        kana_width.write_text("\u3042\u30a2\n", encoding="utf-8", newline="")
+        expect_success(run(exe, ["--strict", "-L", str(kana_width)]), f"4 {kana_width}")
 
         maybe_compare_with_wc(exe, temp_dir)
 
