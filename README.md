@@ -95,6 +95,27 @@ python bench_backends.py --file big.txt
 
 In benchmark reports, `avg ms` is wall-clock time measured by the Python harness around the subprocess. `avg MiB/s` is parsed from `fastawc --speed` output and reflects the tool's internal processing interval.
 
+### Linux `big.txt` Comparison
+Measured on WSL/Linux with GNU `wc` 9.4 against a 3.2 GiB `big.txt` sample. The table uses wall-clock subprocess time without `fastawc --speed`, 3 interleaved runs.
+
+Classic `-l -w -c`:
+
+| command | avg time | throughput | vs `wc` |
+|---|---:|---:|---:|
+| `fastawc -l -w -c big.txt` | `5.516s` | `580.9 MiB/s` | `6.39x` faster |
+| `fastawc --strict -l -w -c big.txt` | `5.505s` | `582.0 MiB/s` | `6.40x` faster |
+| `wc -l -w -c big.txt` | `35.227s` | `91.0 MiB/s` | baseline |
+
+Full `-l -w -c -m -L`:
+
+| command | avg time | throughput | vs `wc` |
+|---|---:|---:|---:|
+| `fastawc -l -w -c -m -L big.txt` | `5.467s` | `586.1 MiB/s` | `6.42x` faster |
+| `fastawc --strict -l -w -c -m -L big.txt` | `5.655s` | `566.6 MiB/s` | `6.20x` faster |
+| `wc -l -w -c -m -L big.txt` | `35.085s` | `91.3 MiB/s` | baseline |
+
+Correctness on the same file in strict mode matched GNU `wc` by metric: `66037000` lines, `566328000` words, `3359649000` bytes, `3293614000` characters, and maximum display width `78`. Combined full output order differs: `fastawc` prints bytes before characters, while GNU `wc` prints characters before bytes. Fast mode is not fully `wc`-compatible; on this file fast mode reported max line width `79` while strict mode and `wc` reported `78`.
+
 Strict compatibility run:
 ```bash
 build/Release/fastawc --strict -l -w -c -m -L big.txt

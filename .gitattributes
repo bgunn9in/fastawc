@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+*.7z binary
+*.exe binary
+*.dll binary
+*.lib binary
+*.obj binary
+*.pdb binary
+*.ilk binary
+*.gcda binary
+*.gcno binary
+*.profraw binary
+*.profdata binary
